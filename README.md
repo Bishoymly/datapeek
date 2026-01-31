@@ -1,5 +1,9 @@
 # Datapeek
 
+<div align="center">
+  <img src="public/assets/logo.png" alt="Datapeek Logo" width="200" />
+</div>
+
 A local SQL database browser CLI tool for browsing MS SQL Server databases.
 
 ## Installation

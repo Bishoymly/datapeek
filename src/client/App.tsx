@@ -200,8 +200,7 @@ function AppContent() {
       <header className="border-b bg-header-bg dark:bg-header-bg">
         <div className="flex h-12 items-center justify-between px-4">
           <div className="flex items-center gap-2">
-            <Database className="h-5 w-5" />
-            <h1 className="font-semibold text-sm">Datapeek</h1>
+            <img src="/assets/logo.png" alt="Datapeek" className="h-6 w-auto" />
             {databaseName && (
               <>
                 <span className="text-muted-foreground">/</span>

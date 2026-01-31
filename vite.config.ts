@@ -17,6 +17,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   root: path.resolve(__dirname, './src/client'),
+  publicDir: path.resolve(__dirname, './public'),
   server: {
     port: 5173,
     open: true,
