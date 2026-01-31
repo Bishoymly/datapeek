@@ -1,4 +1,4 @@
-<img src="public/assets/logo.png" alt="Datapeek Logo" width="200" />
+<img src="https://raw.githubusercontent.com/bishoymly/datapeek/main/public/assets/logo.png" alt="Datapeek Logo" width="200" />
 
 **A modern, local SQL database browser for MS SQL Server databases.**
 
