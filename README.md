@@ -1,44 +1,66 @@
-# Datapeek
+<img src="public/assets/logo.png" alt="Datapeek Logo" width="200" />
 
-<div align="center">
-  <img src="public/assets/logo.png" alt="Datapeek Logo" width="200" />
-</div>
+**A modern, local SQL database browser for MS SQL Server databases.**
 
-A local SQL database browser CLI tool for browsing MS SQL Server databases.
+Datapeek provides an intuitive web-based interface to browse, query, and explore your SQL Server databases directly from your terminal.
 
-## Installation
+## Quick Start
 
-```bash
-npm install -g datapeek
-```
+### Option 1: With Connection String (Recommended)
 
-Or use directly with npx:
-
-```bash
-npx datapeek
-```
-
-## Usage
-
-### With Connection String
+Run Datapeek with your connection string directly:
 
 ```bash
 npx datapeek "Server=localhost;Database=MyDB;User Id=sa;Password=password;"
 ```
 
-### Without Connection String
+This will automatically connect and open your browser to the Datapeek interface.
+
+### Option 2: Without Connection String
+
+Run Datapeek without arguments to use the interactive connection dialog:
 
 ```bash
 npx datapeek
 ```
 
-This will open a connection dialog in your browser where you can enter your connection details.
+A connection dialog will open in your browser where you can enter your database connection details.
+
+## Features
+
+- 🗄️ **Browse Tables** - Explore database schemas and tables with an intuitive sidebar
+- 📊 **View Data** - Paginated table views with Excel-like cell selection and copy
+- 🔍 **Search & Filter** - Quickly find tables and data
+- 📝 **SQL Editor** - Write and execute queries with syntax highlighting
+- ⭐ **Favorites** - Bookmark frequently used tables
+- 💾 **Connection History** - Recent connections are remembered
+- 🎨 **Modern UI** - Clean, responsive interface
+- 🌓 **Dark Mode** - Built-in theme toggle
+- 📋 **Copy to Excel** - Select cells and copy with headers (Ctrl+C)
+
+## Installation (Optional)
+
+If you use Datapeek frequently, you can install it globally:
+
+```bash
+npm install -g datapeek
+```
+
+Then run it directly:
+
+```bash
+datapeek "Server=localhost;Database=MyDB;User Id=sa;Password=password;"
+```
 
 ## Development
 
-### Running in Development Mode
+For developers who want to contribute or customize Datapeek:
 
 ```bash
+# Clone the repository
+git clone https://github.com/bishoymly/datapeek.git
+cd datapeek
+
 # Install dependencies
 npm install
 
@@ -47,39 +69,15 @@ npm run dev
 
 # Run with connection string
 CONNECTION_STRING="Server=localhost;Database=MyDB;User Id=sa;Password=password;" npm run dev
-```
 
-### Building for Production
-
-```bash
+# Build for production
 npm run build
 ```
 
-## Features
+## Requirements
 
-- 🗄️ Browse database tables and schemas
-- 📊 View table data with pagination
-- 🔍 Search and filter tables
-- 📝 SQL query editor with syntax highlighting
-- 💾 Recent connections history
-- 🎨 Modern UI
-- 🌓 Dark mode support
-
-## Example Connection Strings
-
-```bash
-# Local SQL Server with SQL Auth
-Server=localhost;Database=MyDB;User Id=sa;Password=MyPassword;
-
-# Local SQL Server with Windows Auth
-Server=localhost;Database=MyDB;Integrated Security=true;
-
-# SQL Server Express
-Server=localhost\\SQLEXPRESS;Database=MyDB;User Id=sa;Password=MyPassword;
-
-# Remote SQL Server
-Server=myserver.database.windows.net;Database=MyDB;User Id=myuser;Password=MyPassword;Encrypt=true;
-```
+- Node.js 18 or higher
+- MS SQL Server database (local or remote)
 
 ## License
 
