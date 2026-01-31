@@ -1,5 +1,3 @@
-#!/usr/bin/env node
-
 import { Command } from 'commander';
 import { startServer } from '../server/index.js';
 import open from 'open';

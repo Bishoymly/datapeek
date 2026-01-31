@@ -10,7 +10,14 @@ export default defineConfig([
     platform: 'node',
     target: 'node18',
     banner: {
-      js: '#!/usr/bin/env node',
+      js: '#!/usr/bin/env node\n',
+    },
+    esbuildOptions(options) {
+      // Ensure shebang is properly formatted
+      if (!options.banner) {
+        options.banner = {};
+      }
+      options.banner.js = '#!/usr/bin/env node\n';
     },
   },
   {

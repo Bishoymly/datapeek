@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 import { connectionRoutes } from './routes/connection.js';
 import { tableRoutes } from './routes/tables.js';
 import { queryRoutes } from './routes/query.js';
@@ -25,9 +26,11 @@ export async function startServer(port: number, connectionString?: string): Prom
   app.use('/api/tables', tableRoutes);
   app.use('/api/query', queryRoutes);
   
-  // Serve static files in production
-  if (process.env.NODE_ENV === 'production') {
-    const clientDist = path.join(__dirname, '../client');
+  // Serve static files (always serve when client dist exists)
+  const clientDist = path.join(__dirname, '../client');
+  const clientExists = existsSync(clientDist) && existsSync(path.join(clientDist, 'index.html'));
+  
+  if (clientExists) {
     app.use(express.static(clientDist));
     app.get('*', (req, res) => {
       // Don't serve index.html for API routes
@@ -35,6 +38,20 @@ export async function startServer(port: number, connectionString?: string): Prom
         return res.status(404).json({ error: 'Not found' });
       }
       res.sendFile(path.join(clientDist, 'index.html'));
+    });
+  } else {
+    // Fallback: serve a simple message if client isn't built
+    app.get('/', (req, res) => {
+      res.send(`
+        <html>
+          <head><title>Datapeek</title></head>
+          <body>
+            <h1>Datapeek Server</h1>
+            <p>Server is running. Please build the client with: npm run build:client</p>
+            <p>API available at: <a href="/api/health">/api/health</a></p>
+          </body>
+        </html>
+      `);
     });
   }
   

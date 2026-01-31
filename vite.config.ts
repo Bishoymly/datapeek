@@ -16,6 +16,7 @@ export default defineConfig({
     outDir: path.resolve(__dirname, './dist/client'),
     emptyOutDir: true,
   },
+  root: path.resolve(__dirname, './src/client'),
   server: {
     port: 5173,
     open: true,

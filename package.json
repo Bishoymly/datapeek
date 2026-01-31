@@ -6,6 +6,10 @@
   "bin": {
     "datapeek": "./dist/cli/index.js"
   },
+  "exports": {
+    ".": "./dist/server/index.js",
+    "./cli": "./dist/cli/index.js"
+  },
   "engines": {
     "node": ">=18.0.0"
   },
@@ -22,7 +26,8 @@
     "build": "npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:server": "tsup",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "chmod +x dist/cli/index.js || true"
   },
   "keywords": [
     "sql",
