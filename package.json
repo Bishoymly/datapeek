@@ -38,6 +38,10 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bishoymly/datapeek"
+  },
   "dependencies": {
     "commander": "^12.1.0",
     "cors": "^2.8.5",

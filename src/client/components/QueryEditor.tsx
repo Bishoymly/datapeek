@@ -94,7 +94,7 @@ export function QueryEditor({ initialQuery }: QueryEditorProps) {
   }, [query, isLoading]);
 
   return (
-    <div className="flex flex-col h-full border-t">
+    <div className="flex flex-col h-full border-t bg-grid-bg dark:bg-grid-bg">
       <div className="border-b p-2 flex items-center justify-between bg-muted/30">
         <div className="flex items-center gap-2">
           <Button

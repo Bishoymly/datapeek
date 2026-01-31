@@ -1,6 +1,6 @@
 # Datapeek
 
-A local SQL database browser CLI tool, similar to Prisma Studio, for browsing MS SQL Server databases.
+A local SQL database browser CLI tool for browsing MS SQL Server databases.
 
 ## Installation
 
@@ -58,7 +58,7 @@ npm run build
 - 🔍 Search and filter tables
 - 📝 SQL query editor with syntax highlighting
 - 💾 Recent connections history
-- 🎨 Modern, Apple-style UI
+- 🎨 Modern UI
 - 🌓 Dark mode support
 
 ## Example Connection Strings

@@ -120,7 +120,7 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
     : favoriteTables;
 
   return (
-    <div className="flex h-full flex-col border-r bg-card">
+    <div className="flex h-full flex-col border-r bg-sidebar-bg dark:bg-sidebar-bg">
       <div className="border-b p-4">
         <div className="relative">
           <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />

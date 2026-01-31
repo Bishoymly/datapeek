@@ -29,6 +29,12 @@
     --chart-3: 197 37% 24%;
     --chart-4: 43 74% 66%;
     --chart-5: 27 87% 67%;
+    /* Panel-specific backgrounds for light theme (same as background) */
+    --header-bg: 0 0% 100%;
+    --sidebar-bg: 0 0% 100%;
+    --content-bg: 0 0% 100%;
+    --tabs-bg: 0 0% 100%;
+    --grid-bg: 0 0% 100%;
   }
 
   .dark {
@@ -46,7 +52,7 @@
     --muted-foreground: 215 20.2% 65.1%;
     --accent: 217.2 32.6% 17.5%;
     --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --destructive: 0 70% 55%;
     --destructive-foreground: 210 40% 98%;
     --border: 217.2 32.6% 17.5%;
     --input: 217.2 32.6% 17.5%;
@@ -56,6 +62,12 @@
     --chart-3: 30 80% 55%;
     --chart-4: 280 65% 60%;
     --chart-5: 340 75% 55%;
+    /* Panel-specific backgrounds for dark theme */
+    --header-bg: 222.2 84% 6.5%;
+    --sidebar-bg: 222.2 84% 5.5%;
+    --content-bg: 222.2 84% 4.9%;
+    --tabs-bg: 222.2 84% 5.2%;
+    --grid-bg: 222.2 84% 5.0%;
   }
 }
 

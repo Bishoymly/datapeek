@@ -8,6 +8,7 @@ import { api } from './lib/api';
 import { Database, X, Loader2, ChevronDown } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from './components/ui/button';
+import { ThemeToggle } from './components/ThemeToggle';
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -194,9 +195,9 @@ function AppContent() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-background">
+    <div className="flex h-screen flex-col bg-content-bg dark:bg-content-bg">
       {/* Header */}
-      <header className="border-b bg-card">
+      <header className="border-b bg-header-bg dark:bg-header-bg">
         <div className="flex h-12 items-center justify-between px-4">
           <div className="flex items-center gap-2">
             <Database className="h-5 w-5" />
@@ -208,23 +209,26 @@ function AppContent() {
               </>
             )}
           </div>
-          {connected && (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="flex items-center gap-2 px-2 py-1 rounded bg-green-500/10 text-green-600 dark:text-green-400 text-xs hover:bg-green-500/20 transition-colors cursor-pointer">
-                  <div className="h-2 w-2 rounded-full bg-green-500" />
-                  Connected
-                  <ChevronDown className="h-3 w-3 opacity-70" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem variant="destructive" onClick={handleDisconnect}>
-                  <X className="h-3 w-3 mr-2" />
-                  Disconnect
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
+          <div className="flex items-center gap-2">
+            <ThemeToggle />
+            {connected && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="flex items-center gap-2 px-2 py-1 rounded bg-green-500/10 text-green-600 dark:text-green-400 text-xs hover:bg-green-500/20 transition-colors cursor-pointer">
+                    <div className="h-2 w-2 rounded-full bg-green-500" />
+                    Connected
+                    <ChevronDown className="h-3 w-3 opacity-70" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem variant="destructive" onClick={handleDisconnect}>
+                    <X className="h-3 w-3 mr-2" />
+                    Disconnect
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
         </div>
       </header>
 
@@ -257,9 +261,9 @@ function AppContent() {
           </div>
 
           {/* Content Area */}
-          <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex-1 flex flex-col overflow-hidden bg-content-bg dark:bg-content-bg">
             {/* Tabs */}
-            <div className="border-b flex">
+            <div className="border-b flex bg-tabs-bg dark:bg-tabs-bg">
               <button
                 onClick={() => setView('table')}
                 className={view === 'table' 

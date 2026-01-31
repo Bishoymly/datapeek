@@ -53,6 +53,21 @@ export default {
           4: 'hsl(var(--chart-4))',
           5: 'hsl(var(--chart-5))',
         },
+        header: {
+          bg: 'hsl(var(--header-bg))',
+        },
+        sidebar: {
+          bg: 'hsl(var(--sidebar-bg))',
+        },
+        content: {
+          bg: 'hsl(var(--content-bg))',
+        },
+        tabs: {
+          bg: 'hsl(var(--tabs-bg))',
+        },
+        grid: {
+          bg: 'hsl(var(--grid-bg))',
+        },
       },
     },
   },
