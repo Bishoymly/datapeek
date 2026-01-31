@@ -1,0 +1,12 @@
+src/
+tsconfig.json
+tsup.config.ts
+vite.config.ts
+tailwind.config.js
+postcss.config.js
+*.log
+.DS_Store
+.env
+.env.local
+.vite/
+node_modules/
