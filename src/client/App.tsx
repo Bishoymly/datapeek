@@ -153,10 +153,14 @@ function AppContent() {
       if (config.server && config.database) {
         // Connect directly (skip test for auto-connect to avoid timing issues)
         console.log('Connecting directly...');
-        await api.connect(config);
-        console.log('Connected successfully!');
-        setConnected(true);
-        setIsAutoConnecting(false);
+        const result = await api.connect(config);
+        if (result.success) {
+          console.log('Connected successfully!');
+          setConnected(true);
+          setIsAutoConnecting(false);
+        } else {
+          throw new Error(result.message || 'Connection failed');
+        }
       } else {
         throw new Error(`Connection string missing required fields. Server: ${config.server}, Database: ${config.database}`);
       }

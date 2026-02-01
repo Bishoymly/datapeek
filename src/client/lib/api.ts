@@ -53,6 +53,10 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
     });
+    if (!res.ok) {
+      const errorText = await res.text().catch(() => 'Connection failed');
+      return { success: false, message: errorText || `Connection failed: ${res.status} ${res.statusText}` };
+    }
     return res.json();
   },
 
@@ -88,7 +92,11 @@ export const api = {
 
   async getTables(): Promise<Table[]> {
     const res = await fetch(`${API_BASE}/tables`);
-    if (!res.ok) throw new Error('Failed to fetch tables');
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({ error: 'Failed to fetch tables' }));
+      const errorMsg = errorData.error || `Failed to fetch tables: ${res.status} ${res.statusText}`;
+      throw new Error(errorMsg);
+    }
     return res.json();
   },
 

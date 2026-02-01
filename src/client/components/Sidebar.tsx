@@ -43,7 +43,7 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
   const tableRefs = useRef<Record<string, HTMLDivElement>>({});
   const tableMenuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const { data: tables = [], isLoading } = useQuery<Table[]>({
+  const { data: tables = [], isLoading, error } = useQuery<Table[]>({
     queryKey: ['tables'],
     queryFn: () => api.getTables(),
     refetchInterval: 30000, // Refresh every 30 seconds
@@ -159,6 +159,14 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
         {isLoading ? (
           <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
             Loading tables...
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center py-8 text-sm text-destructive px-4 text-center">
+            <Database className="h-8 w-8 mb-2 opacity-50" />
+            <div className="font-medium">Failed to load tables</div>
+            <div className="text-xs mt-1 text-muted-foreground">
+              {error instanceof Error ? error.message : 'Unknown error'}
+            </div>
           </div>
         ) : filteredSchemas.length === 0 && filteredFavorites.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
