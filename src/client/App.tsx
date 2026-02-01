@@ -211,6 +211,12 @@ function AppContent() {
                 <span className="text-sm text-muted-foreground">{databaseName}</span>
               </>
             )}
+            {selectedTable && (
+              <>
+                <span className="text-muted-foreground">/</span>
+                <span className="text-sm text-muted-foreground">{selectedTable.schema}.{selectedTable.table}</span>
+              </>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <ThemeToggle />
