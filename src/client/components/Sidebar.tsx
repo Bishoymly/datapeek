@@ -78,8 +78,27 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
     setExpandedSchemas(newExpanded);
   };
 
-  // Keep Favorites expanded by default, but don't auto-expand other schemas
-  // Schemas will remain collapsed unless user manually expands them
+  // Auto-expand schemas when searching, auto-collapse when clearing search
+  useEffect(() => {
+    if (searchQuery) {
+      // Expand all schemas that have matching tables
+      const matchingSchemas = new Set<string>(['Favorites']); // Always keep Favorites expanded
+      const query = searchQuery.toLowerCase();
+      Object.entries(groupedTables).forEach(([schema, schemaTables]) => {
+        // Check if schema name matches or any table in schema matches
+        if (
+          schema.toLowerCase().includes(query) ||
+          schemaTables.some((t) => t.tableName.toLowerCase().includes(query))
+        ) {
+          matchingSchemas.add(schema);
+        }
+      });
+      setExpandedSchemas(matchingSchemas);
+    } else {
+      // Collapse all except Favorites when search is cleared
+      setExpandedSchemas(new Set(['Favorites']));
+    }
+  }, [searchQuery, groupedTables]);
 
   const toggleFavorite = useCallback((schema: string, table: string, e: React.MouseEvent) => {
     e.stopPropagation();

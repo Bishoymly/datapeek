@@ -662,11 +662,19 @@ export function DataGrid({ schema, table, onQueryChange }: DataGridProps) {
       selectedRows = data.data.slice(minRow, maxRow + 1);
     }
 
+    // Determine if we should include headers
+    // Include headers only when selecting multiple columns
+    const isSingleCell = selectionType === 'cell' && minRow === maxRow && minColIdx === maxColIdx;
+    const isSingleColumn = selectionType === 'column' && selectedColumns.length === 1;
+    const includeHeaders = !isSingleCell && !isSingleColumn && selectedColumns.length > 1;
+
     // Build TSV format (tab-separated values)
     const lines: string[] = [];
     
-    // Add headers
-    lines.push(selectedColumns.join('\t'));
+    // Add headers only for multiple columns
+    if (includeHeaders) {
+      lines.push(selectedColumns.join('\t'));
+    }
     
     // Add data rows
     selectedRows.forEach((row) => {
