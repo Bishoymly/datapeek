@@ -89,13 +89,21 @@ connectionRoutes.get('/status', async (req, res) => {
     const { getConnection, executeQuery } = await import('../db/mssql.js');
     const pool = getConnection();
     if (pool && pool.connected) {
-      // Get database name
+      // Actually test the connection by running a simple query
       try {
         const result = await executeQuery('SELECT DB_NAME() as databaseName');
         const databaseName = result[0]?.databaseName || null;
         res.json({ connected: true, databaseName });
-      } catch {
-        res.json({ connected: true, databaseName: null });
+      } catch (error: any) {
+        // If query fails, connection is not actually working
+        // Check if it's an authentication error
+        const errorMessage = error.message || '';
+        if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+          // Disconnect on authentication failure
+          const { disconnect } = await import('../db/mssql.js');
+          await disconnect();
+        }
+        res.json({ connected: false });
       }
     } else {
       res.json({ connected: false });

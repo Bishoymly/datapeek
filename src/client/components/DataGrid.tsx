@@ -13,7 +13,7 @@ import {
 } from '@tanstack/react-table';
 import { api, type TableData } from '@/lib/api';
 import { Button } from './ui/button';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -29,6 +29,7 @@ interface DataGridProps {
   schema: string;
   table: string;
   onQueryChange?: (query: string) => void;
+  onCreateQuery?: (query: string) => void;
 }
 
 const TABLE_CONFIG_STORAGE_KEY = 'datapeek_table_config';
@@ -188,7 +189,7 @@ interface CellSelection {
   selectionType?: 'cell' | 'row' | 'column';
 }
 
-export function DataGrid({ schema, table, onQueryChange }: DataGridProps) {
+export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGridProps) {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -419,6 +420,38 @@ export function DataGrid({ schema, table, onQueryChange }: DataGridProps) {
   const columnIds = useMemo(() => {
     return columns.map((col) => col.id || col.accessorKey).filter((id): id is string => !!id);
   }, [columns]);
+
+  // Generate SQL query from current grid state
+  const generateQueryFromGrid = useCallback(() => {
+    // Get visible columns from table instance
+    const visibleCols = tableInstance.getVisibleLeafColumns()
+      .map(col => col.id)
+      .filter((id): id is string => !!id);
+    
+    // Get all column IDs
+    const allColIds = columnIds;
+    
+    // Build column list
+    const columnList = visibleCols.length === allColIds.length
+      ? '*'
+      : visibleCols.map(col => `[${col}]`).join(', ');
+    
+    // Build base query
+    let query = `SELECT TOP ${pageSize} ${columnList}\nFROM [${schema}].[${table}]`;
+    
+    // Add ORDER BY if sorting is applied
+    if (sortColumn && sortDirection) {
+      query += `\nORDER BY [${sortColumn}] ${sortDirection.toUpperCase()}`;
+    }
+    
+    return query;
+  }, [schema, table, tableInstance, columnIds, pageSize, sortColumn, sortDirection]);
+
+  const handleCreateQuery = useCallback(() => {
+    if (!onCreateQuery) return;
+    const query = generateQueryFromGrid();
+    onCreateQuery(query);
+  }, [generateQueryFromGrid, onCreateQuery]);
   
   // Sort columns by their order in columnOrder for display in menu
   const orderedColumnIds = useMemo(() => {
@@ -784,6 +817,18 @@ export function DataGrid({ schema, table, onQueryChange }: DataGridProps) {
           {data.pagination.total} rows
         </div>
         <div className="flex items-center gap-2">
+          {onCreateQuery && (
+            <Button 
+              variant="outline" 
+              size="sm" 
+              className="h-7 text-xs"
+              onClick={handleCreateQuery}
+              title="Create query from current view"
+            >
+              <FileText className="h-3 w-3 mr-1.5" />
+              Create Query
+            </Button>
+          )}
           <DropdownMenu open={showColumnMenu} onOpenChange={setShowColumnMenu}>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm" className="h-7 text-xs">

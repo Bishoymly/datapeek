@@ -24,6 +24,13 @@ tableRoutes.get('/', async (req, res) => {
     const result = await executeQuery(query);
     res.json(result);
   } catch (error: any) {
+    // Check if it's an authentication error
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+      // Disconnect on authentication failure
+      const { disconnect } = await import('../db/mssql.js');
+      await disconnect();
+    }
     res.status(500).json({ error: error.message || 'Failed to fetch tables' });
   }
 });
@@ -67,6 +74,13 @@ tableRoutes.get('/:schema/:table', async (req, res) => {
     
     res.json(result);
   } catch (error: any) {
+    // Check if it's an authentication error
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+      // Disconnect on authentication failure
+      const { disconnect } = await import('../db/mssql.js');
+      await disconnect();
+    }
     res.status(500).json({ error: error.message || 'Failed to fetch table structure' });
   }
 });
@@ -192,7 +206,13 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     });
   } catch (error: any) {
     console.error('Error fetching table data:', error);
-    const errorMessage = error.message || 'Failed to fetch table data';
+    // Check if it's an authentication error
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+      // Disconnect on authentication failure
+      const { disconnect } = await import('../db/mssql.js');
+      await disconnect();
+    }
     const errorDetails = error.originalError?.message || error.originalError?.info?.message || '';
     res.status(500).json({ 
       error: errorMessage,

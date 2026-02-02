@@ -152,3 +152,28 @@ export async function executeQuery(
   const result = await request.query(query);
   return result.recordset || [];
 }
+
+export async function executeQueryMultiple(
+  query: string, 
+  parameters?: Array<{ name: string; value: any; type?: any }>
+): Promise<any[][]> {
+  if (!pool || !pool.connected) {
+    throw new Error('Not connected to database');
+  }
+  
+  const request = pool.request();
+  
+  if (parameters) {
+    for (const param of parameters) {
+      if (param.type) {
+        request.input(param.name, param.type, param.value);
+      } else {
+        request.input(param.name, param.value);
+      }
+    }
+  }
+  
+  const result = await request.query(query);
+  // Return all result sets (recordsets is an array of arrays)
+  return result.recordsets || [];
+}

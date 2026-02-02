@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Table } from '@/lib/api';
-import { Database, Table as TableIcon, ChevronRight, ChevronDown, Search, Star, ChevronUp, X, ChevronLeft } from 'lucide-react';
+import { Database, Table as TableIcon, ChevronRight, ChevronDown, Search, Star, ChevronUp, X, ChevronLeft, FileText, Plus } from 'lucide-react';
 import { Input } from './ui/input';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
   onTableSelect: (schema: string, table: string) => void;
   selectedTable?: { schema: string; table: string };
+  onQuerySelect?: (queryId: string | undefined) => void;
+  selectedQuery?: string;
+  queriesUpdated?: number; // Timestamp to trigger refresh
+  favoritesUpdated?: number; // Timestamp to trigger refresh
 }
 
 interface FavoriteTable {
@@ -15,7 +19,16 @@ interface FavoriteTable {
   table: string;
 }
 
+interface SavedQuery {
+  id: string;
+  name: string;
+  query: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 const FAVORITES_STORAGE_KEY = 'datapeek_favorites';
+const QUERIES_STORAGE_KEY = 'datapeek_queries';
 
 function getFavorites(): FavoriteTable[] {
   try {
@@ -34,14 +47,87 @@ function isFavorite(schema: string, table: string, favorites: FavoriteTable[]): 
   return favorites.some((f) => f.schema === schema && f.table === table);
 }
 
-export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
+function getQueries(): SavedQuery[] {
+  try {
+    const stored = localStorage.getItem(QUERIES_STORAGE_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveQueries(queries: SavedQuery[]) {
+  localStorage.setItem(QUERIES_STORAGE_KEY, JSON.stringify(queries));
+}
+
+function deleteQuery(queryId: string): boolean {
+  try {
+    const queries = getQueries();
+    const filtered = queries.filter(q => q.id !== queryId);
+    if (filtered.length === queries.length) {
+      return false; // Query not found
+    }
+    saveQueries(filtered);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renameQuery(queryId: string, newName: string): boolean {
+  try {
+    const queries = getQueries();
+    const index = queries.findIndex(q => q.id === queryId);
+    if (index === -1) {
+      return false; // Query not found
+    }
+    // Ensure .sql extension is present
+    const finalName = newName.endsWith('.sql') ? newName : `${newName}.sql`;
+    queries[index] = {
+      ...queries[index],
+      name: finalName,
+      updatedAt: Date.now(),
+    };
+    saveQueries(queries);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Helper function to remove .sql extension for display
+function getDisplayName(queryName: string): string {
+  return queryName.endsWith('.sql') ? queryName.slice(0, -4) : queryName;
+}
+
+function createNewQuery(): SavedQuery {
+  const queries = getQueries();
+  const existingNumbers = queries
+    .map((q) => {
+      const match = q.name.match(/Query(\d+)\.sql/);
+      return match ? parseInt(match[1], 10) : 0;
+    })
+    .filter((n) => n > 0);
+  
+  const nextNumber = existingNumbers.length > 0 ? Math.max(...existingNumbers) + 1 : 1;
+  const newQuery: SavedQuery = {
+    id: `query-${Date.now()}`,
+    name: `Query${nextNumber.toString().padStart(2, '0')}.sql`,
+    query: 'SELECT TOP 100 * FROM ',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  
+  const updatedQueries = [...queries, newQuery];
+  saveQueries(updatedQueries);
+  return newQuery;
+}
+
+export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQuery, queriesUpdated, favoritesUpdated }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(['Favorites']));
+  const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(['Favorites', 'Queries']));
   const [favorites, setFavorites] = useState<FavoriteTable[]>(getFavorites());
-  const [hoveredTable, setHoveredTable] = useState<{ schema: string; table: string } | null>(null);
-  const [tableMenuPosition, setTableMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const tableRefs = useRef<Record<string, HTMLDivElement>>({});
-  const tableMenuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [queries, setQueries] = useState<SavedQuery[]>(getQueries());
 
   const { data: tables = [], isLoading, error } = useQuery<Table[]>({
     queryKey: ['tables'],
@@ -49,14 +135,16 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
     refetchInterval: 30000, // Refresh every 30 seconds
   });
 
-  // Group tables by schema
-  const groupedTables = tables.reduce((acc, table) => {
-    if (!acc[table.schemaName]) {
-      acc[table.schemaName] = [];
-    }
-    acc[table.schemaName].push(table);
-    return acc;
-  }, {} as Record<string, Table[]>);
+  // Group tables by schema (memoized to prevent infinite loops)
+  const groupedTables = useMemo(() => {
+    return tables.reduce((acc, table) => {
+      if (!acc[table.schemaName]) {
+        acc[table.schemaName] = [];
+      }
+      acc[table.schemaName].push(table);
+      return acc;
+    }, {} as Record<string, Table[]>);
+  }, [tables]);
 
   // Filter tables based on search
   const filteredSchemas = Object.entries(groupedTables).filter(([schema, tables]) => {
@@ -78,11 +166,28 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
     setExpandedSchemas(newExpanded);
   };
 
+  // Refresh queries when queriesUpdated timestamp changes
+  useEffect(() => {
+    if (queriesUpdated) {
+      setQueries(getQueries());
+      // Ensure Queries section is expanded when a new query is added
+      setExpandedSchemas(prev => new Set([...prev, 'Queries']));
+    }
+  }, [queriesUpdated]);
+
+  // Refresh favorites when favoritesUpdated timestamp changes
+  useEffect(() => {
+    if (favoritesUpdated) {
+      setFavorites(getFavorites());
+    }
+  }, [favoritesUpdated]);
+
+
   // Auto-expand schemas when searching, auto-collapse when clearing search
   useEffect(() => {
     if (searchQuery) {
       // Expand all schemas that have matching tables
-      const matchingSchemas = new Set<string>(['Favorites']); // Always keep Favorites expanded
+      const matchingSchemas = new Set<string>(['Favorites', 'Queries']); // Always keep Favorites and Queries expanded
       const query = searchQuery.toLowerCase();
       Object.entries(groupedTables).forEach(([schema, schemaTables]) => {
         // Check if schema name matches or any table in schema matches
@@ -93,12 +198,27 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
           matchingSchemas.add(schema);
         }
       });
-      setExpandedSchemas(matchingSchemas);
+      // Also expand Queries if any query matches
+      if (queries.some((q) => q.name.toLowerCase().includes(query) || q.query.toLowerCase().includes(query))) {
+        matchingSchemas.add('Queries');
+      }
+      // Only update if the expanded schemas actually changed
+      setExpandedSchemas((prev) => {
+        const prevSorted = Array.from(prev).sort().join(',');
+        const newSorted = Array.from(matchingSchemas).sort().join(',');
+        return prevSorted === newSorted ? prev : matchingSchemas;
+      });
     } else {
-      // Collapse all except Favorites when search is cleared
-      setExpandedSchemas(new Set(['Favorites']));
+      // Collapse all except Favorites and Queries when search is cleared
+      // Only update if not already in the correct state
+      const expectedSet = new Set(['Favorites', 'Queries']);
+      setExpandedSchemas((prev) => {
+        const prevSorted = Array.from(prev).sort().join(',');
+        const expectedSorted = Array.from(expectedSet).sort().join(',');
+        return prevSorted === expectedSorted ? prev : expectedSet;
+      });
     }
-  }, [searchQuery, groupedTables]);
+  }, [searchQuery, tables, queries, groupedTables]);
 
   const toggleFavorite = useCallback((schema: string, table: string, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -142,14 +262,6 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
       )
     : favoriteTables;
 
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (tableMenuTimeoutRef.current) {
-        clearTimeout(tableMenuTimeoutRef.current);
-      }
-    };
-  }, []);
 
   return (
     <div className="flex h-full flex-col border-r bg-sidebar-bg dark:bg-sidebar-bg">
@@ -205,87 +317,102 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
                   ) : (
                     <ChevronRight className="h-3.5 w-3.5" />
                   )}
-                  <Star className="h-3.5 w-3.5 fill-yellow-500 text-yellow-500" />
                   <span className="flex-1 truncate">Favorites</span>
                   <span className="text-xs text-muted-foreground">{filteredFavorites.length}</span>
                 </button>
 
                 {expandedSchemas.has('Favorites') && (
                   <div className="ml-4 space-y-0.5">
-                    {filteredFavorites.map((fav, favIndex) => {
+                    {filteredFavorites.map((fav) => {
                       const isSelected =
                         selectedTable?.schema === fav.schema &&
                         selectedTable?.table === fav.tableInfo.tableName;
-                      const isFirst = favIndex === 0;
-                      const isLast = favIndex === filteredFavorites.length - 1;
-                      const tableKey = `fav-${fav.schema}.${fav.tableInfo.tableName}`;
-                      const isHovered = hoveredTable?.schema === fav.schema && hoveredTable?.table === fav.tableInfo.tableName;
 
                       return (
-                        <div
-                          key={tableKey}
-                          ref={(el) => {
-                            if (el) tableRefs.current[tableKey] = el;
-                          }}
-                          className="group relative flex items-center gap-1"
-                          onMouseEnter={() => {
-                            if (tableMenuTimeoutRef.current) {
-                              clearTimeout(tableMenuTimeoutRef.current);
-                              tableMenuTimeoutRef.current = null;
-                            }
-                            setHoveredTable({ schema: fav.schema, table: fav.tableInfo.tableName });
-                            const element = tableRefs.current[tableKey];
-                            if (element) {
-                              const rect = element.getBoundingClientRect();
-                              setTableMenuPosition({
-                                top: rect.top + rect.height / 2,
-                                left: rect.right + 4,
-                              });
-                            }
-                          }}
-                          onMouseLeave={(e) => {
-                            const relatedTarget = e.relatedTarget as HTMLElement;
-                            const isMovingToMenu = relatedTarget?.closest('[data-table-menu]');
-                            const isMovingToTable = relatedTarget?.closest('.group');
-                            
-                            if (!isMovingToMenu && !isMovingToTable) {
-                              if (tableMenuTimeoutRef.current) {
-                                clearTimeout(tableMenuTimeoutRef.current);
-                              }
-                              tableMenuTimeoutRef.current = setTimeout(() => {
-                                const menuElement = document.querySelector(`[data-table-menu]`);
-                                const hoveredTableElement = document.querySelector('.group:hover');
-                                if (!menuElement?.matches(':hover') && !hoveredTableElement) {
-                                  setHoveredTable(null);
-                                  setTableMenuPosition(null);
-                                }
-                                tableMenuTimeoutRef.current = null;
-                              }, 200);
-                            }
-                          }}
+                        <button
+                          key={`fav-${fav.schema}.${fav.tableInfo.tableName}`}
+                          onClick={() => onTableSelect(fav.schema, fav.tableInfo.tableName)}
+                          className={cn(
+                            'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                            isSelected
+                              ? 'bg-primary text-primary-foreground'
+                              : 'hover:bg-accent'
+                          )}
                         >
-                          <div className="flex-1">
-                            <button
-                              onClick={() => onTableSelect(fav.schema, fav.tableInfo.tableName)}
-                              className={cn(
-                                'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
-                                isSelected
-                                  ? 'bg-primary text-primary-foreground'
-                                  : 'hover:bg-accent'
-                              )}
-                            >
-                              <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                              <span className="flex-1 truncate">{fav.tableInfo.tableName}</span>
-                              <span className="text-xs opacity-60 truncate">{fav.schema}</span>
-                            </button>
-                          </div>
-                        </div>
+                          <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                          <span className="flex-1 truncate">{fav.tableInfo.tableName}</span>
+                          <span className="text-xs opacity-60 truncate">{fav.schema}</span>
+                        </button>
                       );
                     })}
                   </div>
                 )}
               </div>
             )}
+
+            {/* Queries Section */}
+            <div className="space-y-0.5 mb-2">
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => toggleSchema('Queries')}
+                  className="flex-1 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm font-medium hover:bg-accent transition-colors"
+                >
+                  {expandedSchemas.has('Queries') ? (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  )}
+                  <span className="flex-1 truncate">Queries</span>
+                  <span className="text-xs text-muted-foreground">{queries.length}</span>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const newQuery = createNewQuery();
+                    setQueries(getQueries());
+                    if (onQuerySelect) {
+                      onQuerySelect(newQuery.id);
+                    }
+                  }}
+                  className="p-1 rounded hover:bg-accent transition-colors"
+                  title="New Query"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {expandedSchemas.has('Queries') && (
+                <div className="ml-4 space-y-0.5">
+                  {queries.map((query) => {
+                    const isSelected = selectedQuery === query.id;
+                    return (
+                      <button
+                        key={query.id}
+                        onClick={() => {
+                          if (onQuerySelect) {
+                            onQuerySelect(query.id);
+                          }
+                        }}
+                        className={cn(
+                          'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                          isSelected
+                            ? 'bg-primary text-primary-foreground'
+                            : 'hover:bg-accent'
+                        )}
+                      >
+                        <FileText className="h-3.5 w-3.5 flex-shrink-0" />
+                        <span className="flex-1 truncate">{getDisplayName(query.name)}</span>
+                      </button>
+                    );
+                  })}
+                  {queries.length === 0 && (
+                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                      No queries yet
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* Regular Schema Sections */}
             {filteredSchemas.map(([schema, schemaTables]) => {
@@ -318,66 +445,20 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
                           selectedTable?.schema === schema &&
                           selectedTable?.table === table.tableName;
 
-                        const isFav = isFavorite(schema, table.tableName, favorites);
-                        const tableKey = `${schema}.${table.tableName}`;
-                        const isHovered = hoveredTable?.schema === schema && hoveredTable?.table === table.tableName;
-
                         return (
-                          <div
-                            key={tableKey}
-                            ref={(el) => {
-                              if (el) tableRefs.current[tableKey] = el;
-                            }}
-                            className="group relative flex items-center gap-1"
-                            onMouseEnter={() => {
-                              if (tableMenuTimeoutRef.current) {
-                                clearTimeout(tableMenuTimeoutRef.current);
-                                tableMenuTimeoutRef.current = null;
-                              }
-                              setHoveredTable({ schema, table: table.tableName });
-                              const element = tableRefs.current[tableKey];
-                              if (element) {
-                                const rect = element.getBoundingClientRect();
-                                setTableMenuPosition({
-                                  top: rect.top + rect.height / 2,
-                                  left: rect.right + 4,
-                                });
-                              }
-                            }}
-                            onMouseLeave={(e) => {
-                              const relatedTarget = e.relatedTarget as HTMLElement;
-                              const isMovingToMenu = relatedTarget?.closest('[data-table-menu]');
-                              const isMovingToTable = relatedTarget?.closest('.group');
-                              
-                              if (!isMovingToMenu && !isMovingToTable) {
-                                if (tableMenuTimeoutRef.current) {
-                                  clearTimeout(tableMenuTimeoutRef.current);
-                                }
-                                tableMenuTimeoutRef.current = setTimeout(() => {
-                                  const menuElement = document.querySelector(`[data-table-menu]`);
-                                  const hoveredTableElement = document.querySelector('.group:hover');
-                                  if (!menuElement?.matches(':hover') && !hoveredTableElement) {
-                                    setHoveredTable(null);
-                                    setTableMenuPosition(null);
-                                  }
-                                  tableMenuTimeoutRef.current = null;
-                                }, 200);
-                              }
-                            }}
+                          <button
+                            key={`${schema}.${table.tableName}`}
+                            onClick={() => onTableSelect(schema, table.tableName)}
+                            className={cn(
+                              'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                              isSelected
+                                ? 'bg-primary text-primary-foreground'
+                                : 'hover:bg-accent'
+                            )}
                           >
-                            <button
-                              onClick={() => onTableSelect(schema, table.tableName)}
-                              className={cn(
-                                'flex flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
-                                isSelected
-                                  ? 'bg-primary text-primary-foreground'
-                                  : 'hover:bg-accent'
-                              )}
-                            >
-                              <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                              <span className="flex-1 truncate">{table.tableName}</span>
-                            </button>
-                          </div>
+                            <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                            <span className="flex-1 truncate">{table.tableName}</span>
+                          </button>
                         );
                       })}
                     </div>
@@ -392,114 +473,6 @@ export function Sidebar({ onTableSelect, selectedTable }: SidebarProps) {
       <div className="border-t p-2 text-xs text-muted-foreground">
         {tables.length} {tables.length === 1 ? 'table' : 'tables'}
       </div>
-
-      {/* Table hover menu */}
-      {hoveredTable && tableMenuPosition && (() => {
-        const { schema, table } = hoveredTable;
-        const isFav = isFavorite(schema, table, favorites);
-        const favIndex = favorites.findIndex((f) => f.schema === schema && f.table === table);
-        const isFirst = favIndex === 0;
-        const isLast = favIndex === favorites.length - 1;
-        const isInFavorites = favIndex >= 0;
-
-        return (
-          <div
-            data-table-menu={`${schema}.${table}`}
-            className="fixed z-50 bg-popover border rounded-md shadow-lg flex items-center gap-0.5 p-0.5"
-            style={{
-              top: `${tableMenuPosition.top}px`,
-              left: `${tableMenuPosition.left}px`,
-              transform: 'translateY(-50%)',
-            }}
-            onMouseEnter={() => {
-              if (tableMenuTimeoutRef.current) {
-                clearTimeout(tableMenuTimeoutRef.current);
-                tableMenuTimeoutRef.current = null;
-              }
-              setHoveredTable({ schema, table });
-            }}
-            onMouseLeave={(e) => {
-              const relatedTarget = e.relatedTarget as HTMLElement;
-              const isMovingToTable = relatedTarget?.closest('.group');
-              
-              if (!isMovingToTable) {
-                if (tableMenuTimeoutRef.current) {
-                  clearTimeout(tableMenuTimeoutRef.current);
-                }
-                tableMenuTimeoutRef.current = setTimeout(() => {
-                  const menuElement = document.querySelector(`[data-table-menu]`);
-                  const hoveredTableElement = document.querySelector('.group:hover');
-                  if (!menuElement?.matches(':hover') && !hoveredTableElement) {
-                    setHoveredTable(null);
-                    setTableMenuPosition(null);
-                  }
-                  tableMenuTimeoutRef.current = null;
-                }, 200);
-              }
-            }}
-          >
-            {/* Favorite toggle */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleFavorite(schema, table, e as any);
-                setHoveredTable(null);
-                setTableMenuPosition(null);
-              }}
-              className={cn(
-                "p-1.5 hover:bg-accent rounded transition-colors",
-                isFav && "bg-accent"
-              )}
-              title={isFav ? "Remove from favorites" : "Add to favorites"}
-            >
-              <Star className={cn("h-3.5 w-3.5", isFav && "fill-yellow-500 text-yellow-500")} />
-            </button>
-
-            {/* Ordering buttons - only show for favorites */}
-            {isInFavorites && (
-              <>
-                <div className="w-px h-4 bg-border" />
-                
-                {/* Move Up */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    moveFavorite(favIndex, 'up');
-                    setHoveredTable(null);
-                    setTableMenuPosition(null);
-                  }}
-                  disabled={isFirst}
-                  className={cn(
-                    "p-1.5 hover:bg-accent rounded transition-colors",
-                    isFirst && "opacity-50 cursor-not-allowed"
-                  )}
-                  title="Move Up"
-                >
-                  <ChevronUp className="h-3.5 w-3.5" />
-                </button>
-                
-                {/* Move Down */}
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    moveFavorite(favIndex, 'down');
-                    setHoveredTable(null);
-                    setTableMenuPosition(null);
-                  }}
-                  disabled={isLast}
-                  className={cn(
-                    "p-1.5 hover:bg-accent rounded transition-colors",
-                    isLast && "opacity-50 cursor-not-allowed"
-                  )}
-                  title="Move Down"
-                >
-                  <ChevronDown className="h-3.5 w-3.5" />
-                </button>
-              </>
-            )}
-          </div>
-        );
-      })()}
     </div>
   );
 }
