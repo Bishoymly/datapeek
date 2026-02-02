@@ -667,7 +667,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   }, [isSelecting, selection]);
 
   // Copy selection to clipboard
-  const copySelectionToClipboard = useCallback(() => {
+  const copySelectionToClipboard = useCallback(async () => {
     if (!selection || !data?.data) return;
 
     const selectionType = selection.selectionType || 'cell';
@@ -675,6 +675,13 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     const maxRow = Math.max(selection.startRow, selection.endRow);
     const startColIdx = visibleColumnIds.indexOf(selection.startCol);
     const endColIdx = visibleColumnIds.indexOf(selection.endCol);
+    
+    // Validate column indices
+    if (startColIdx === -1 || endColIdx === -1) {
+      console.error('Invalid column selection:', { startCol: selection.startCol, endCol: selection.endCol, visibleColumnIds });
+      return;
+    }
+    
     const minColIdx = Math.min(startColIdx, endColIdx);
     const maxColIdx = Math.max(startColIdx, endColIdx);
 
@@ -724,7 +731,30 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     });
 
     const text = lines.join('\n');
-    navigator.clipboard.writeText(text);
+    
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+      // Fallback: try using the older execCommand method
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (!successful) {
+          console.error('Fallback copy method also failed');
+        }
+      } catch (fallbackError) {
+        console.error('Fallback copy method error:', fallbackError);
+      }
+    }
   }, [selection, data?.data, visibleColumnIds]);
 
   // Handle mouse up
@@ -758,26 +788,39 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   // Handle Ctrl+A to select all and Ctrl+C to copy
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Only handle if the table container or its children have focus
+      // For Ctrl+A, only handle if the table container or its children have focus
       const isTableFocused = tableRef.current?.contains(document.activeElement) || 
                              document.activeElement === tableRef.current;
       
-      if (!isTableFocused) return;
-
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-        e.preventDefault();
-        if (data?.data && visibleColumnIds.length > 0) {
-          setSelection({
-            startRow: 0,
-            startCol: visibleColumnIds[0],
-            endRow: data.data.length - 1,
-            endCol: visibleColumnIds[visibleColumnIds.length - 1],
-            selectionType: 'cell',
-          });
+        if (isTableFocused) {
+          e.preventDefault();
+          if (data?.data && visibleColumnIds.length > 0) {
+            setSelection({
+              startRow: 0,
+              startCol: visibleColumnIds[0],
+              endRow: data.data.length - 1,
+              endCol: visibleColumnIds[visibleColumnIds.length - 1],
+              selectionType: 'cell',
+            });
+          }
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selection) {
-        e.preventDefault();
-        copySelectionToClipboard();
+        // For Ctrl+C, allow copying if there's a selection, even if table doesn't have focus
+        // But only if we're not in an input/textarea (to avoid interfering with normal text selection)
+        const activeElement = document.activeElement;
+        const isInputElement = activeElement && (
+          activeElement.tagName === 'INPUT' ||
+          activeElement.tagName === 'TEXTAREA' ||
+          (activeElement as HTMLElement).isContentEditable
+        );
+        
+        if (!isInputElement) {
+          e.preventDefault();
+          copySelectionToClipboard().catch((error) => {
+            console.error('Failed to copy selection:', error);
+          });
+        }
       }
     };
 

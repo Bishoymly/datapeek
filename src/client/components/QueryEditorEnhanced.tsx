@@ -162,26 +162,12 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryId]);
 
-  // Clear results when query text changes (user typing, not restoring)
+  // Update lastQueryTextRef when query changes (for tracking, but don't clear results)
   useEffect(() => {
-    // Skip if we're restoring from cache or if query hasn't actually changed
-    if (isRestoringRef.current || lastQueryTextRef.current === query) return;
-    
-    lastQueryTextRef.current = query;
-    
-    // Query text changed due to user typing, so results are stale - clear them
-    const cached = resultsCacheRef.current.get(queryId);
-    if (cached && cached.resultSets.length > 0) {
-      setQueryResultSets([]);
-      setQueryError(null);
-      // Update cache to reflect cleared results
-      resultsCacheRef.current.set(queryId, {
-        ...cached,
-        resultSets: [],
-        error: null,
-      });
+    if (!isRestoringRef.current) {
+      lastQueryTextRef.current = query;
     }
-  }, [query, queryId]);
+  }, [query]);
 
   const handleExecute = async () => {
     if (!query.trim() || isExecuting) return;
@@ -490,63 +476,114 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
       <div style={{ height: `${resultsHeight}%` }} className="relative border-b flex flex-col">
         <div className="border-b p-2 bg-muted/30 text-xs text-muted-foreground flex items-center justify-between">
           <span>Results</span>
-          {queryResultSets.length > 0 && (
+          {queryResultSets.length > 1 && (
             <span>
-              {queryResultSets.length} {queryResultSets.length === 1 ? 'result set' : 'result sets'}
+              {queryResultSets.length} result sets
             </span>
           )}
         </div>
         <div className="flex-1 overflow-auto">
-          {queryError ? (
+          {isExecuting ? (
+            <div className="p-4 text-sm text-muted-foreground flex items-center justify-center gap-2 h-full">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>Executing query...</span>
+            </div>
+          ) : queryError ? (
             <div className="p-4 text-sm text-destructive flex items-center gap-2">
               <AlertCircle className="h-4 w-4" />
               {queryError instanceof Error ? queryError.message : 'Query execution failed'}
             </div>
           ) : queryResultSets.length > 0 ? (
-            <div className="space-y-4 p-2">
-              {queryResultSets.map((resultSet, resultSetIndex) => (
-                <div key={resultSetIndex} className="border rounded-md overflow-hidden">
-                  <div className="border-b p-2 bg-muted/50 text-xs font-medium text-muted-foreground">
-                    Result Set {resultSetIndex + 1} ({resultSet.length} {resultSet.length === 1 ? 'row' : 'rows'})
-                  </div>
-                  {resultSet.length > 0 ? (
-                    <div className="overflow-auto max-h-96">
-                      <table className="w-full text-xs">
-                        <thead className="sticky top-0 bg-muted">
-                          <tr>
-                            {Object.keys(resultSet[0]).map((key) => (
-                              <th key={key} className="border-b p-2 text-left font-medium text-muted-foreground">
-                                {key}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {resultSet.map((row: any, idx: number) => (
-                            <tr key={idx} className="border-b hover:bg-muted/30">
-                              {Object.values(row).map((value: any, colIdx: number) => (
-                                <td key={colIdx} className="p-2 font-mono">
-                                  {value === null || value === undefined ? (
-                                    <span className="text-muted-foreground italic">NULL</span>
-                                  ) : (
-                                    String(value)
-                                  )}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
+            queryResultSets.length === 1 ? (
+              // Single result set - show directly without header
+              (() => {
+                const resultSet = queryResultSets[0];
+                if (resultSet.length === 0) {
+                  return (
                     <div className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
                       <CheckCircle2 className="h-4 w-4" />
                       No rows returned
                     </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                  );
+                }
+                return (
+                  <div className="overflow-auto h-full">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-muted">
+                        <tr>
+                          {Object.keys(resultSet[0]).map((key) => (
+                            <th key={key} className="border-b p-2 text-left font-medium text-muted-foreground">
+                              {key}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {resultSet.map((row: any, idx: number) => (
+                          <tr key={idx} className="border-b hover:bg-muted/30">
+                            {Object.values(row).map((value: any, colIdx: number) => (
+                              <td key={colIdx} className="p-2 font-mono">
+                                {value === null || value === undefined ? (
+                                  <span className="text-muted-foreground italic">NULL</span>
+                                ) : (
+                                  String(value)
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()
+            ) : (
+              // Multiple result sets - show with headers
+              <div className="space-y-4 p-2">
+                {queryResultSets.map((resultSet, resultSetIndex) => (
+                  <div key={resultSetIndex} className="border rounded-md overflow-hidden">
+                    <div className="border-b p-2 bg-muted/50 text-xs font-medium text-muted-foreground">
+                      Result Set {resultSetIndex + 1} ({resultSet.length} {resultSet.length === 1 ? 'row' : 'rows'})
+                    </div>
+                    {resultSet.length > 0 ? (
+                      <div className="overflow-auto max-h-96">
+                        <table className="w-full text-xs">
+                          <thead className="sticky top-0 bg-muted">
+                            <tr>
+                              {Object.keys(resultSet[0]).map((key) => (
+                                <th key={key} className="border-b p-2 text-left font-medium text-muted-foreground">
+                                  {key}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {resultSet.map((row: any, idx: number) => (
+                              <tr key={idx} className="border-b hover:bg-muted/30">
+                                {Object.values(row).map((value: any, colIdx: number) => (
+                                  <td key={colIdx} className="p-2 font-mono">
+                                    {value === null || value === undefined ? (
+                                      <span className="text-muted-foreground italic">NULL</span>
+                                    ) : (
+                                      String(value)
+                                    )}
+                                  </td>
+                                ))}
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
+                        <CheckCircle2 className="h-4 w-4" />
+                        No rows returned
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )
           ) : (
             <div className="p-4 text-sm text-muted-foreground text-center">
               No results yet. Execute a query to see results.
