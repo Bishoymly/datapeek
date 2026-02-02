@@ -1,6 +1,6 @@
 {
   "name": "datapeek",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A local SQL database browser CLI tool",
   "type": "module",
   "bin": {
