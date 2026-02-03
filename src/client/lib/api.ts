@@ -112,7 +112,8 @@ export const api = {
     page: number = 1,
     pageSize: number = 100,
     sortColumn?: string,
-    sortDirection?: 'asc' | 'desc'
+    sortDirection?: 'asc' | 'desc',
+    filters?: Record<string, string>
   ): Promise<TableData> {
     const params = new URLSearchParams({
       page: page.toString(),
@@ -121,6 +122,13 @@ export const api = {
     if (sortColumn) {
       params.append('sortColumn', sortColumn);
       params.append('sortDirection', sortDirection || 'asc');
+    }
+    if (filters) {
+      Object.entries(filters).forEach(([column, value]) => {
+        if (value) {
+          params.append(`filter[${column}]`, value);
+        }
+      });
     }
     
     const res = await fetch(

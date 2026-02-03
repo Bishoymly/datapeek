@@ -10,10 +10,12 @@ import {
   type SortingState,
   type ColumnOrderState,
   type VisibilityState,
+  type ColumnFiltersState,
 } from '@tanstack/react-table';
 import { api, type TableData } from '@/lib/api';
 import { Button } from './ui/button';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText } from 'lucide-react';
+import { Input } from './ui/input';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -195,7 +197,11 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   const [sorting, setSorting] = useState<SortingState>([]);
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  const [filterInputValues, setFilterInputValues] = useState<Record<string, string>>({});
   const [showColumnMenu, setShowColumnMenu] = useState(false);
+  const [showFilterInput, setShowFilterInput] = useState<string | null>(null);
+  const filterDebounceRefs = useRef<Record<string, NodeJS.Timeout>>({});
   const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
   const dragStartPos = useRef<number | null>(null);
@@ -208,8 +214,10 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   // Column header hover menu state
   const [hoveredColumn, setHoveredColumn] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
+  const [menuHeight, setMenuHeight] = useState<number>(36); // Default menu height
   const headerRefs = useRef<Record<string, HTMLTableCellElement>>({});
   const menuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   // Clean up any remaining old storage keys (one-time cleanup)
   useEffect(() => {
@@ -239,11 +247,31 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     setSelection(null);
     setHoveredColumn(null);
     setMenuPosition(null);
+    setColumnFilters([]);
+    setFilterInputValues({});
+    setShowFilterInput(null);
+    // Clear all filter debounce timers
+    Object.values(filterDebounceRefs.current).forEach(clearTimeout);
+    filterDebounceRefs.current = {};
     if (menuTimeoutRef.current) {
       clearTimeout(menuTimeoutRef.current);
       menuTimeoutRef.current = null;
     }
   }, [schema, table]);
+
+  // Sync filterInputValues with columnFilters when filters are cleared externally
+  useEffect(() => {
+    const activeFilterIds = new Set(columnFilters.map((f) => f.id));
+    setFilterInputValues((prev) => {
+      const next = { ...prev };
+      Object.keys(next).forEach((columnId) => {
+        if (!activeFilterIds.has(columnId)) {
+          delete next[columnId];
+        }
+      });
+      return next;
+    });
+  }, [columnFilters]);
 
   // Load and apply column sorting when table changes
   useEffect(() => {
@@ -284,10 +312,57 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   const sortColumn = sorting.length > 0 ? sorting[0].id : undefined;
   const sortDirection = sorting.length > 0 ? (sorting[0].desc ? 'desc' : 'asc') : undefined;
 
-  const { data, isLoading, error } = useQuery<TableData>({
-    queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection],
-    queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection),
+  // Convert columnFilters to API format
+  const filters = useMemo(() => {
+    const filterObj: Record<string, string> = {};
+    columnFilters.forEach((filter) => {
+      if (filter.value && typeof filter.value === 'string' && filter.value.trim()) {
+        filterObj[filter.id] = filter.value.trim();
+      }
+    });
+    console.log('Column filters:', columnFilters);
+    console.log('Converted filters for API:', filterObj);
+    return filterObj;
+  }, [columnFilters]);
+
+  // Debounce filter input values to columnFilters (500ms delay)
+  useEffect(() => {
+    // Clear all existing timeouts
+    Object.values(filterDebounceRefs.current).forEach(clearTimeout);
+    filterDebounceRefs.current = {};
+
+    // Set up debounced updates for each filter input
+    Object.entries(filterInputValues).forEach(([columnId, value]) => {
+      filterDebounceRefs.current[columnId] = setTimeout(() => {
+        setColumnFilters((prev) => {
+          const filtered = prev.filter((f) => f.id !== columnId);
+          if (value.trim()) {
+            return [...filtered, { id: columnId, value: value.trim() }];
+          }
+          return filtered;
+        });
+      }, 500);
+    });
+
+    return () => {
+      // Cleanup: clear all timeouts on unmount or when filterInputValues changes
+      Object.values(filterDebounceRefs.current).forEach(clearTimeout);
+      filterDebounceRefs.current = {};
+    };
+  }, [filterInputValues]);
+
+  // Reset to page 1 when filters change
+  useEffect(() => {
+    if (Object.keys(filters).length > 0 && page !== 1) {
+      setPage(1);
+    }
+  }, [JSON.stringify(filters)]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const { data, isLoading, error, isFetching } = useQuery<TableData>({
+    queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, filters],
+    queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, filters),
     enabled: !!schema && !!table,
+    keepPreviousData: true, // Keep previous data while fetching new data
   });
 
   // Update query in parent when data changes
@@ -368,27 +443,34 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
       ? columnOrder
       : allKeys;
 
-    return orderedKeys.map((key) => ({
-      id: key,
-      accessorKey: key,
-      header: ({ column }) => {
-        const isSorted = column.getIsSorted();
-        const sortDirection = isSorted === 'asc' ? 'asc' : isSorted === 'desc' ? 'desc' : null;
-        return (
-          <div className="flex items-center gap-1.5">
-            <span>{key}</span>
-            {sortDirection && (
-              <span className="inline-flex items-center shrink-0">
-                {sortDirection === 'asc' ? (
-                  <ArrowUp className="h-3.5 w-3.5 text-primary" />
-                ) : (
-                  <ArrowDown className="h-3.5 w-3.5 text-primary" />
-                )}
-              </span>
-            )}
-          </div>
-        );
-      },
+    return orderedKeys.map((key) => {
+      const columnFilter = columnFilters.find((f) => f.id === key);
+      const isFiltered = !!columnFilter?.value;
+      
+      return {
+        id: key,
+        accessorKey: key,
+        header: ({ column }) => {
+          const isSorted = column.getIsSorted();
+          const sortDirection = isSorted === 'asc' ? 'asc' : isSorted === 'desc' ? 'desc' : null;
+          return (
+            <div className="flex items-center gap-1.5">
+              <span>{key}</span>
+              {isFiltered && (
+                <Filter className="h-3 w-3 text-primary shrink-0" />
+              )}
+              {sortDirection && (
+                <span className="inline-flex items-center shrink-0">
+                  {sortDirection === 'asc' ? (
+                    <ArrowUp className="h-3.5 w-3.5 text-primary" />
+                  ) : (
+                    <ArrowDown className="h-3.5 w-3.5 text-primary" />
+                  )}
+                </span>
+              )}
+            </div>
+          );
+        },
       cell: ({ getValue }) => {
         const value = getValue();
         if (value === null || value === undefined) {
@@ -399,8 +481,9 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
           <span className="font-mono text-xs truncate max-w-md">{str}</span>
         );
       },
-    }));
-  }, [data?.data, columnOrder, draggedColumn, dragOverColumn]);
+    };
+    });
+  }, [data?.data, columnOrder, draggedColumn, dragOverColumn, columnFilters]);
 
   const tableInstance = useReactTable({
     data: data?.data || [],
@@ -411,7 +494,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     onSortingChange: setSorting,
     onColumnOrderChange: setColumnOrder,
     onColumnVisibilityChange: setColumnVisibility,
-    state: { sorting, columnOrder, columnVisibility },
+    onColumnFiltersChange: setColumnFilters,
+    state: { sorting, columnOrder, columnVisibility, columnFilters },
     manualPagination: true,
     pageCount: data?.pagination.totalPages || 0,
   });
@@ -828,9 +912,10 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selection, data?.data, visibleColumnIds, copySelectionToClipboard]);
 
-  if (isLoading) {
+  if (isLoading && !data) {
     return (
       <div className="flex items-center justify-center h-64 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin mr-2" />
         Loading data...
       </div>
     );
@@ -854,10 +939,19 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
 
   return (
     <div className="flex flex-col h-full bg-grid-bg dark:bg-grid-bg">
-      <div className="border-b p-2 flex items-center justify-between bg-muted/30">
-        <div className="text-sm text-muted-foreground">
-          Showing {((page - 1) * pageSize) + 1} - {Math.min(page * pageSize, data.pagination.total)} of{' '}
-          {data.pagination.total} rows
+      <div className="border-b p-2 flex items-center justify-between bg-muted/30 relative">
+        <div className="text-sm text-muted-foreground flex items-center gap-2">
+          {data ? (
+            <>
+              Showing {((page - 1) * pageSize) + 1} - {Math.min(page * pageSize, data.pagination.total)} of{' '}
+              {data.pagination.total} rows
+            </>
+          ) : (
+            <span>Loading...</span>
+          )}
+          {isFetching && (
+            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+          )}
         </div>
         <div className="flex items-center gap-2">
           {onCreateQuery && (
@@ -1003,10 +1097,16 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
 
       <div 
         ref={tableRef}
-        className="flex-1 overflow-auto"
+        className="flex-1 overflow-auto relative"
         tabIndex={0}
         onMouseLeave={() => setIsSelecting(false)}
       >
+        {isFetching && data && (
+          <div className="absolute top-0 right-0 m-2 z-20 flex items-center gap-2 bg-background/80 backdrop-blur-sm border rounded-md px-2 py-1 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            <span>Refreshing...</span>
+          </div>
+        )}
         <table className="w-full border-collapse">
           <thead className="sticky top-0 bg-muted z-10">
             {tableInstance.getHeaderGroups().map((headerGroup) => (
@@ -1091,19 +1191,22 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
                           clearTimeout(menuTimeoutRef.current);
                         }
                         
-                        // Check if we're moving to another header or the menu
+                        // Check if we're moving to another header, the menu, or filter input
                         const relatedTarget = e.relatedTarget as HTMLElement;
                         const isMovingToMenu = relatedTarget?.closest('[data-column-menu]');
+                        const isMovingToFilter = relatedTarget?.closest('[data-column-filter]');
                         const isMovingToHeader = relatedTarget?.closest('th');
                         
-                        // Only close if not moving to menu or another header
-                        if (!isMovingToMenu && !isMovingToHeader) {
+                        // Only close if not moving to menu, filter, or another header
+                        if (!isMovingToMenu && !isMovingToFilter && !isMovingToHeader) {
                           menuTimeoutRef.current = setTimeout(() => {
                             const menuElement = document.querySelector(`[data-column-menu]`);
+                            const filterElement = document.querySelector(`[data-column-filter]`);
                             const hoveredHeader = document.querySelector('th:hover');
-                            if (!menuElement?.matches(':hover') && !hoveredHeader) {
+                            if (!menuElement?.matches(':hover') && !filterElement?.matches(':hover') && !hoveredHeader) {
                               setHoveredColumn(null);
                               setMenuPosition(null);
+                              setShowFilterInput(null);
                             }
                             menuTimeoutRef.current = null;
                           }, 200);
@@ -1178,6 +1281,12 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
         
         return (
           <div
+            ref={(el) => {
+              menuRef.current = el;
+              if (el) {
+                setMenuHeight(el.offsetHeight);
+              }
+            }}
             data-column-menu={columnId}
             className="fixed z-50 bg-popover border rounded-md shadow-lg flex items-center gap-0.5 p-0.5"
             style={{
@@ -1290,6 +1399,23 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             
             <div className="w-px h-4 bg-border" />
             
+            {/* Filter */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowFilterInput(showFilterInput === columnId ? null : columnId);
+              }}
+              className={cn(
+                "p-1.5 hover:bg-accent rounded transition-colors",
+                column?.getFilterValue() && "bg-accent"
+              )}
+              title="Filter Column"
+            >
+              <Filter className="h-3.5 w-3.5" />
+            </button>
+            
+            <div className="w-px h-4 bg-border" />
+            
             {/* Hide */}
             <button
               onClick={(e) => {
@@ -1306,10 +1432,109 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
           </div>
         );
       })()}
+      
+      {/* Filter Input - rendered outside menu to avoid overflow clipping */}
+      {showFilterInput && hoveredColumn && menuPosition && (() => {
+        const columnId = showFilterInput;
+        const column = tableInstance.getColumn(columnId);
+        const filterValue = filterInputValues[columnId] || '';
+        const hasActiveFilter = column?.getFilterValue() as string | undefined;
+        
+        return (
+          <div
+            className="fixed z-50 bg-popover border rounded-md shadow-lg p-2"
+            style={{
+              top: `${menuPosition.top - menuHeight}px`,
+              left: `${menuPosition.left}px`,
+              transform: 'translateY(-100%)',
+              minWidth: '200px',
+            }}
+            onMouseEnter={() => {
+              if (menuTimeoutRef.current) {
+                clearTimeout(menuTimeoutRef.current);
+                menuTimeoutRef.current = null;
+              }
+            }}
+            onMouseLeave={(e) => {
+              const relatedTarget = e.relatedTarget as HTMLElement;
+              const isMovingToMenu = relatedTarget?.closest('[data-column-menu]');
+              
+              if (!isMovingToMenu) {
+                if (menuTimeoutRef.current) {
+                  clearTimeout(menuTimeoutRef.current);
+                }
+                
+                menuTimeoutRef.current = setTimeout(() => {
+                  const menuElement = document.querySelector(`[data-column-menu]`);
+                  const filterElement = document.querySelector('[data-column-filter]');
+                  const hoveredHeader = document.querySelector('th:hover');
+                  if (!menuElement?.matches(':hover') && !filterElement?.matches(':hover') && !hoveredHeader) {
+                    setShowFilterInput(null);
+                  }
+                  menuTimeoutRef.current = null;
+                }, 200);
+              }
+            }}
+            data-column-filter={columnId}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="text"
+                placeholder={`Filter ${columnId}...`}
+                value={filterValue}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setFilterInputValues((prev) => ({
+                    ...prev,
+                    [columnId]: value,
+                  }));
+                }}
+                className="h-7 text-xs"
+                autoFocus
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Escape') {
+                    setShowFilterInput(null);
+                  }
+                }}
+                disabled={isFetching}
+              />
+              {(filterValue || hasActiveFilter) && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Clear the debounce timeout for this column
+                    if (filterDebounceRefs.current[columnId]) {
+                      clearTimeout(filterDebounceRefs.current[columnId]);
+                      delete filterDebounceRefs.current[columnId];
+                    }
+                    setFilterInputValues((prev) => {
+                      const next = { ...prev };
+                      delete next[columnId];
+                      return next;
+                    });
+                    setColumnFilters((prev) => prev.filter((f) => f.id !== columnId));
+                  }}
+                  className="p-1 hover:bg-accent rounded transition-colors"
+                  title="Clear Filter"
+                  disabled={isFetching}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="border-t p-2 flex items-center justify-between bg-muted/30">
         <div className="text-xs text-muted-foreground">
-          Page {page} of {data.pagination.totalPages}
+          {data ? (
+            <>Page {page} of {data.pagination.totalPages}</>
+          ) : (
+            <>Loading...</>
+          )}
         </div>
         <div className="flex items-center gap-1">
           <Button
@@ -1317,7 +1542,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             size="icon"
             className="h-7 w-7"
             onClick={() => setPage(1)}
-            disabled={page === 1}
+            disabled={!data || page === 1 || isFetching}
           >
             <ChevronsLeft className="h-3 w-3" />
           </Button>
@@ -1326,7 +1551,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             size="icon"
             className="h-7 w-7"
             onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={page === 1}
+            disabled={!data || page === 1 || isFetching}
           >
             <ChevronLeft className="h-3 w-3" />
           </Button>
@@ -1334,8 +1559,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             variant="outline"
             size="icon"
             className="h-7 w-7"
-            onClick={() => setPage((p) => Math.min(data.pagination.totalPages, p + 1))}
-            disabled={page >= data.pagination.totalPages}
+            onClick={() => setPage((p) => Math.min(data?.pagination.totalPages || 1, p + 1))}
+            disabled={!data || page >= (data?.pagination.totalPages || 1) || isFetching}
           >
             <ChevronRight className="h-3 w-3" />
           </Button>
@@ -1343,8 +1568,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             variant="outline"
             size="icon"
             className="h-7 w-7"
-            onClick={() => setPage(data.pagination.totalPages)}
-            disabled={page >= data.pagination.totalPages}
+            onClick={() => setPage(data?.pagination.totalPages || 1)}
+            disabled={!data || page >= (data?.pagination.totalPages || 1) || isFetching}
           >
             <ChevronsRight className="h-3 w-3" />
           </Button>

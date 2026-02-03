@@ -95,14 +95,75 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     const sortDirection = req.query.sortDirection as string || 'asc';
     const offset = (page - 1) * pageSize;
     
+    // Parse filters from query params (format: filter[columnName]=value)
+    const filters: Record<string, string> = {};
+    Object.keys(req.query).forEach((key) => {
+      const match = key.match(/^filter\[(.+)\]$/);
+      if (match && req.query[key] && String(req.query[key]).trim()) {
+        filters[match[1]] = String(req.query[key]).trim();
+      }
+    });
+    console.log('Received filters from query:', filters);
+    console.log('All query params:', req.query);
+    
     const pool = getConnection();
     if (!pool || !pool.connected) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
     
-    // Get total count
-    const countQuery = `SELECT COUNT(*) as total FROM [${schema}].[${table}]`;
-    const countResult = await executeQuery(countQuery);
+    // Validate filter columns exist
+    const filterColumns: string[] = [];
+    if (Object.keys(filters).length > 0) {
+      try {
+        // Build IN clause with proper parameterization
+        const columnNames = Object.keys(filters);
+        const placeholders = columnNames.map((_, i) => `@col${i}`).join(', ');
+        const validateQuery = `
+          SELECT COLUMN_NAME 
+          FROM INFORMATION_SCHEMA.COLUMNS 
+          WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table AND COLUMN_NAME IN (${placeholders})
+        `;
+        const validateParams = [
+          { name: 'schema', value: schema, type: sql.NVarChar },
+          { name: 'table', value: table, type: sql.NVarChar },
+          ...columnNames.map((col, i) => ({ name: `col${i}`, value: col, type: sql.NVarChar }))
+        ];
+        const validateResult = await executeQuery(validateQuery, validateParams);
+        filterColumns.push(...validateResult.map((r: any) => r.COLUMN_NAME));
+        console.log('Validated filter columns:', filterColumns, 'from filters:', filters);
+      } catch (e) {
+        // If validation fails, log and ignore filters
+        console.error('Error validating filter columns:', e);
+        console.error('Filters that failed validation:', filters);
+      }
+    }
+    
+    // Build WHERE clause for filters
+    let whereClause = '';
+    const filterParams: any[] = [];
+    if (filterColumns.length > 0) {
+      const validFilters = filterColumns.filter((col) => {
+        const filterValue = filters[col];
+        return filterValue && filterValue.trim() !== '';
+      });
+      
+      if (validFilters.length > 0) {
+        const whereConditions = validFilters.map((col, index) => {
+          const filterValue = filters[col];
+          filterParams.push({ name: `filter${index}`, value: `%${filterValue.trim()}%`, type: sql.NVarChar });
+          return `[${col}] LIKE @filter${index}`;
+        });
+        
+        whereClause = `WHERE ${whereConditions.join(' AND ')}`;
+        console.log('Applying WHERE clause:', whereClause);
+        console.log('Filter params:', filterParams);
+        console.log('Valid filters:', validFilters);
+      }
+    }
+    
+    // Get total count with filters
+    const countQuery = `SELECT COUNT(*) as total FROM [${schema}].[${table}]${whereClause ? ' ' + whereClause : ''}`;
+    const countResult = await executeQuery(countQuery, filterParams.length > 0 ? filterParams : []);
     const total = countResult[0]?.total || 0;
     
     // Determine order by column
@@ -159,33 +220,37 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     if (orderByColumn) {
       // Use the specified or first column for ordering
       // Always escape column name with brackets for safety
-      generatedQuery = `SELECT * FROM [${schema}].[${table}]\nORDER BY [${orderByColumn}] ${orderByDirection}\nOFFSET ${offset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
+      generatedQuery = `SELECT * FROM [${schema}].[${table}]${whereClause ? '\n' + whereClause : ''}\nORDER BY [${orderByColumn}] ${orderByDirection}\nOFFSET ${offset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
       
       const dataQuery = `
         SELECT * FROM [${schema}].[${table}]
+        ${whereClause}
         ORDER BY [${orderByColumn}] ${orderByDirection}
         OFFSET @offset ROWS
         FETCH NEXT @pageSize ROWS ONLY
       `;
       data = await executeQuery(dataQuery, [
         { name: 'offset', value: offset, type: sql.Int },
-        { name: 'pageSize', value: pageSize, type: sql.Int }
+        { name: 'pageSize', value: pageSize, type: sql.Int },
+        ...filterParams
       ]);
     } else {
       // Fallback: use a subquery with ROW_NUMBER for pagination
-      generatedQuery = `SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as rn\n  FROM [${schema}].[${table}]\n) t\nWHERE rn > ${offset} AND rn <= ${offset + pageSize}\nORDER BY rn`;
+      generatedQuery = `SELECT * FROM (\n  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as rn\n  FROM [${schema}].[${table}]${whereClause ? '\n  ' + whereClause : ''}\n) t\nWHERE rn > ${offset} AND rn <= ${offset + pageSize}\nORDER BY rn`;
       
       const dataQuery = `
         SELECT * FROM (
           SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as rn
           FROM [${schema}].[${table}]
+          ${whereClause}
         ) t
         WHERE rn > @offset AND rn <= @offset + @pageSize
         ORDER BY rn
       `;
       data = await executeQuery(dataQuery, [
         { name: 'offset', value: offset, type: sql.Int },
-        { name: 'pageSize', value: pageSize, type: sql.Int }
+        { name: 'pageSize', value: pageSize, type: sql.Int },
+        ...filterParams
       ]);
       // Remove the rn column from results
       data = data.map((row: any) => {

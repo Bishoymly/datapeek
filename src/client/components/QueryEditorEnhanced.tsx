@@ -508,7 +508,7 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
                 }
                 return (
                   <div className="overflow-auto h-full">
-                    <table className="w-full text-xs">
+                    <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
                       <thead className="sticky top-0 bg-muted">
                         <tr>
                           {Object.keys(resultSet[0]).map((key) => (
@@ -522,11 +522,11 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
                         {resultSet.map((row: any, idx: number) => (
                           <tr key={idx} className="border-b hover:bg-muted/30">
                             {Object.values(row).map((value: any, colIdx: number) => (
-                              <td key={colIdx} className="p-2 font-mono">
+                              <td key={colIdx} className="p-2 font-mono text-xs whitespace-nowrap">
                                 {value === null || value === undefined ? (
                                   <span className="text-muted-foreground italic">NULL</span>
                                 ) : (
-                                  String(value)
+                                  <span className="truncate max-w-md block">{String(value)}</span>
                                 )}
                               </td>
                             ))}
@@ -547,7 +547,7 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
                     </div>
                     {resultSet.length > 0 ? (
                       <div className="overflow-auto max-h-96">
-                        <table className="w-full text-xs">
+                        <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
                           <thead className="sticky top-0 bg-muted">
                             <tr>
                               {Object.keys(resultSet[0]).map((key) => (
@@ -561,11 +561,11 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
                             {resultSet.map((row: any, idx: number) => (
                               <tr key={idx} className="border-b hover:bg-muted/30">
                                 {Object.values(row).map((value: any, colIdx: number) => (
-                                  <td key={colIdx} className="p-2 font-mono">
+                                  <td key={colIdx} className="p-2 font-mono text-xs whitespace-nowrap">
                                     {value === null || value === undefined ? (
                                       <span className="text-muted-foreground italic">NULL</span>
                                     ) : (
-                                      String(value)
+                                      <span className="truncate max-w-md block">{String(value)}</span>
                                     )}
                                   </td>
                                 ))}
