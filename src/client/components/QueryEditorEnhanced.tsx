@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 import { Button } from './ui/button';
-import { Play, Loader2, AlertCircle, CheckCircle2, Clock } from 'lucide-react';
+import { Play, Loader2, AlertCircle, CheckCircle2, Clock, Download } from 'lucide-react';
 import { api } from '@/lib/api';
 import { DataGrid } from './DataGrid';
+import * as XLSX from 'xlsx';
 
 const QUERIES_STORAGE_KEY = 'datapeek_queries';
 
@@ -111,6 +112,100 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
   const [queryResultSets, setQueryResultSets] = useState<any[][]>([]);
   const [queryError, setQueryError] = useState<Error | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+
+  // Export functions
+  const exportToCSV = useCallback(() => {
+    if (queryResultSets.length === 0) return;
+    
+    let csvContent = '';
+    
+    queryResultSets.forEach((resultSet, index) => {
+      if (resultSet.length === 0) return;
+      
+      // Add result set header
+      if (queryResultSets.length > 1) {
+        csvContent += `Result Set ${index + 1}\n`;
+      }
+      
+      // Get column headers
+      const headers = Object.keys(resultSet[0]);
+      csvContent += headers.join(',') + '\n';
+      
+      // Add rows
+      resultSet.forEach((row) => {
+        const values = headers.map((header) => {
+          const value = row[header];
+          if (value === null || value === undefined) {
+            return '';
+          }
+          // Escape commas and quotes in CSV
+          const stringValue = String(value);
+          if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+            return `"${stringValue.replace(/"/g, '""')}"`;
+          }
+          return stringValue;
+        });
+        csvContent += values.join(',') + '\n';
+      });
+      
+      // Add separator between result sets
+      if (index < queryResultSets.length - 1) {
+        csvContent += '\n';
+      }
+    });
+    
+    // Create download
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `${savedQuery?.name.replace('.sql', '') || 'query_results'}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [queryResultSets, savedQuery]);
+
+  const exportToExcel = useCallback(() => {
+    if (queryResultSets.length === 0) return;
+    
+    const workbook = XLSX.utils.book_new();
+    
+    queryResultSets.forEach((resultSet, index) => {
+      if (resultSet.length === 0) {
+        // Create empty sheet for empty result set
+        const ws = XLSX.utils.aoa_to_sheet([['No rows returned']]);
+        const sheetName = queryResultSets.length > 1 
+          ? `Result Set ${index + 1}`.substring(0, 31) // Excel sheet name limit
+          : (savedQuery?.name.replace('.sql', '') || 'Results').substring(0, 31);
+        XLSX.utils.book_append_sheet(workbook, ws, sheetName);
+        return;
+      }
+      
+      // Convert result set to worksheet
+      const worksheet = XLSX.utils.json_to_sheet(resultSet);
+      
+      // Add sheet to workbook
+      const sheetName = queryResultSets.length > 1 
+        ? `Result Set ${index + 1}`.substring(0, 31) // Excel sheet name limit
+        : (savedQuery?.name.replace('.sql', '') || 'Results').substring(0, 31);
+      XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+    });
+    
+    // Generate Excel file and download
+    const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const link = document.createElement('a');
+    const url = URL.createObjectURL(blob);
+    link.setAttribute('href', url);
+    link.setAttribute('download', `${savedQuery?.name.replace('.sql', '') || 'query_results'}.xlsx`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [queryResultSets, savedQuery]);
 
   // Restore results and load query when switching queries
   useEffect(() => {
@@ -476,11 +571,37 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
       <div style={{ height: `${resultsHeight}%` }} className="relative border-b flex flex-col">
         <div className="border-b p-2 bg-muted/30 text-xs text-muted-foreground flex items-center justify-between">
           <span>Results</span>
-          {queryResultSets.length > 1 && (
-            <span>
-              {queryResultSets.length} result sets
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {queryResultSets.length > 1 && (
+              <span>
+                {queryResultSets.length} result sets
+              </span>
+            )}
+            {queryResultSets.length > 0 && (
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={exportToCSV}
+                  title="Export to CSV"
+                >
+                  <Download className="h-3 w-3 mr-1" />
+                  CSV
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={exportToExcel}
+                  title="Export to Excel"
+                >
+                  <Download className="h-3 w-3 mr-1" />
+                  Excel
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
         <div className="flex-1 overflow-auto">
           {isExecuting ? (

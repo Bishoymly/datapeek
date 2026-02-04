@@ -3,39 +3,13 @@ import { executeQuery, executeQueryMultiple } from '../db/mssql.js';
 
 export const queryRoutes = Router();
 
-// Execute SELECT query (read-only)
+// Execute SQL query
 queryRoutes.post('/', async (req, res) => {
   try {
     const { query: sqlQuery } = req.body;
     
     if (!sqlQuery || typeof sqlQuery !== 'string') {
       return res.status(400).json({ error: 'Query is required' });
-    }
-    
-    // Basic read-only enforcement - only allow SELECT statements
-    const trimmedQuery = sqlQuery.trim().toUpperCase();
-    if (!trimmedQuery.startsWith('SELECT')) {
-      return res.status(400).json({ 
-        error: 'Only SELECT queries are allowed (read-only mode)' 
-      });
-    }
-    
-    // Prevent dangerous operations even in SELECT
-    // Use word boundaries to match keywords as whole words, not substrings in identifiers
-    const dangerousKeywords = ['DROP', 'DELETE', 'INSERT', 'UPDATE', 'ALTER', 'CREATE', 'TRUNCATE', 'EXEC', 'EXECUTE'];
-    const hasDangerousKeyword = dangerousKeywords.some(keyword => {
-      // Match keyword as whole word, accounting for SQL syntax (spaces, brackets, parentheses, etc.)
-      // \b is word boundary, but we need to handle SQL context better
-      // Match keyword followed by space, semicolon, or at end of string
-      // Also handle cases where keyword might be after brackets or parentheses
-      const regex = new RegExp(`\\b${keyword}\\b`, 'i');
-      return regex.test(sqlQuery);
-    });
-    
-    if (hasDangerousKeyword) {
-      return res.status(400).json({ 
-        error: 'Query contains prohibited keywords. Only SELECT queries are allowed.' 
-      });
     }
     
     const startTime = Date.now();
