@@ -12,10 +12,11 @@ import {
   type VisibilityState,
   type ColumnFiltersState,
 } from '@tanstack/react-table';
-import { api, type TableData } from '@/lib/api';
+import { api, type TableData, type Column } from '@/lib/api';
+import { formatName } from '@/lib/nameFormatter';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -32,6 +33,7 @@ interface DataGridProps {
   table: string;
   onQueryChange?: (query: string) => void;
   onCreateQuery?: (query: string) => void;
+  nameDisplayMode?: 'database-names' | 'friendly-names';
 }
 
 const TABLE_CONFIG_STORAGE_KEY = 'datapeek_table_config';
@@ -191,7 +193,30 @@ interface CellSelection {
   selectionType?: 'cell' | 'row' | 'column';
 }
 
-export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGridProps) {
+export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisplayMode = 'database-names' }: DataGridProps) {
+  // Helper functions for FK display mode persistence
+  const getFkDisplayMode = useCallback((): 'key-only' | 'key-display' | 'display-only' => {
+    try {
+      const key = `datapeek_fk_display_mode_${schema}_${table}`;
+      const saved = localStorage.getItem(key);
+      if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
+        return saved;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    return 'key-only';
+  }, [schema, table]);
+
+  const saveFkDisplayMode = useCallback((mode: 'key-only' | 'key-display' | 'display-only') => {
+    try {
+      const key = `datapeek_fk_display_mode_${schema}_${table}`;
+      localStorage.setItem(key, mode);
+    } catch {
+      // Ignore storage errors
+    }
+  }, [schema, table]);
+
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
   const [sorting, setSorting] = useState<SortingState>([]);
@@ -201,6 +226,18 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   const [filterInputValues, setFilterInputValues] = useState<Record<string, string>>({});
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [showFilterInput, setShowFilterInput] = useState<string | null>(null);
+  const [fkDisplayMode, setFkDisplayMode] = useState<'key-only' | 'key-display' | 'display-only'>(() => {
+    try {
+      const key = `datapeek_fk_display_mode_${schema}_${table}`;
+      const saved = localStorage.getItem(key);
+      if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
+        return saved;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    return 'key-only';
+  });
   const filterDebounceRefs = useRef<Record<string, NodeJS.Timeout>>({});
   const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
@@ -250,6 +287,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     setColumnFilters([]);
     setFilterInputValues({});
     setShowFilterInput(null);
+    // Load FK display mode for the new table
+    setFkDisplayMode(getFkDisplayMode());
     // Clear all filter debounce timers
     Object.values(filterDebounceRefs.current).forEach(clearTimeout);
     filterDebounceRefs.current = {};
@@ -358,12 +397,37 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     }
   }, [JSON.stringify(filters)]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Fetch table structure to get foreign key information
+  const { data: tableStructure } = useQuery<Column[]>({
+    queryKey: ['table-structure', schema, table],
+    queryFn: () => api.getTableStructure(schema, table),
+    enabled: !!schema && !!table,
+  });
+
+  // Fetch table data first (needed for foreign key values extraction)
   const { data, isLoading, error, isFetching } = useQuery<TableData>({
-    queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, filters],
-    queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, filters),
+    queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, filters, fkDisplayMode],
+    queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, filters, fkDisplayMode),
     enabled: !!schema && !!table,
     keepPreviousData: true, // Keep previous data while fetching new data
   });
+
+  // Build foreign key map
+  const foreignKeyMap = useMemo(() => {
+    if (!tableStructure) return {};
+    const fkMap: Record<string, { referencedSchema: string; referencedTable: string; referencedColumn: string }> = {};
+    tableStructure.forEach((col) => {
+      if (col.referencedSchema && col.referencedTable && col.referencedColumn) {
+        fkMap[col.columnName] = {
+          referencedSchema: col.referencedSchema,
+          referencedTable: col.referencedTable,
+          referencedColumn: col.referencedColumn,
+        };
+      }
+    });
+    return fkMap;
+  }, [tableStructure]);
+
 
   // Update query in parent when data changes
   useEffect(() => {
@@ -438,9 +502,10 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   const columns = useMemo<ColumnDef<any>[]>(() => {
     if (!data?.data || data.data.length === 0) return [];
 
-    const allKeys = Object.keys(data.data[0]);
+    const allKeys = Object.keys(data.data[0])
+      .filter(key => !key.endsWith('_display')); // Filter out display columns
     const orderedKeys = columnOrder.length > 0 && columnOrder.length === allKeys.length
-      ? columnOrder
+      ? columnOrder.filter(key => !key.endsWith('_display'))
       : allKeys;
 
     return orderedKeys.map((key) => {
@@ -455,7 +520,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
           const sortDirection = isSorted === 'asc' ? 'asc' : isSorted === 'desc' ? 'desc' : null;
           return (
             <div className="flex items-center gap-1.5">
-              <span>{key}</span>
+              <span>{formatName(key, nameDisplayMode)}</span>
               {isFiltered && (
                 <Filter className="h-3 w-3 text-primary shrink-0" />
               )}
@@ -471,19 +536,43 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             </div>
           );
         },
-      cell: ({ getValue }) => {
+      cell: ({ getValue, row }) => {
         const value = getValue();
         if (value === null || value === undefined) {
           return <span className="text-muted-foreground italic">NULL</span>;
         }
+        
+        // Check if this is a foreign key column and if we have a display value
+        const displayColumn = `${key}_display`;
+        const displayValue = row.original[displayColumn];
         const str = String(value);
+        
+        // Render based on FK display mode
+        if (displayValue !== null && displayValue !== undefined) {
+          if (fkDisplayMode === 'key-display') {
+            // Display both ID and friendly name with a dash separator
+            return (
+              <span className="font-mono text-xs truncate max-w-md">
+                <span className="text-muted-foreground">{str}</span>
+                <span className="ml-2 text-foreground">- {String(displayValue)}</span>
+              </span>
+            );
+          } else if (fkDisplayMode === 'display-only') {
+            // Display only the friendly name (this shouldn't happen for FK key columns as they're removed)
+            return (
+              <span className="font-mono text-xs truncate max-w-md text-foreground">{String(displayValue)}</span>
+            );
+          }
+        }
+        
+        // For 'key-only' mode or when no display value, show just the key
         return (
           <span className="font-mono text-xs truncate max-w-md">{str}</span>
         );
       },
     };
     });
-  }, [data?.data, columnOrder, draggedColumn, dragOverColumn, columnFilters]);
+  }, [data?.data, columnOrder, draggedColumn, dragOverColumn, columnFilters, fkDisplayMode]);
 
   const tableInstance = useReactTable({
     data: data?.data || [],
@@ -507,29 +596,189 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
 
   // Generate SQL query from current grid state
   const generateQueryFromGrid = useCallback(() => {
-    // Get visible columns from table instance
+    // Use the actual query from the server as a base, which includes JOINs, filters, sorting
+    const baseQuery = data?.query;
+    
+    if (!baseQuery) {
+      // Fallback: build basic query if server query not available
+      const visibleCols = tableInstance.getVisibleLeafColumns()
+        .map(col => col.id)
+        .filter((id): id is string => !!id)
+        .filter(id => !id.endsWith('_display'));
+      const columnList = visibleCols.length === columnIds.filter(id => !id.endsWith('_display')).length
+        ? '*'
+        : visibleCols.map(col => `[${col}]`).join(', ');
+      return `SELECT ${columnList}\nFROM [${schema}].[${table}]`;
+    }
+    
+    // Parse and modify the query
+    let query = baseQuery;
+    
+    // Calculate current pagination values
+    const currentOffset = (page - 1) * pageSize;
+    
+    // Replace pagination with current page values
+    // Handle OFFSET/FETCH pagination (multiline pattern)
+    query = query.replace(/\n\s*OFFSET\s+\d+\s+ROWS\s*\n?\s*FETCH\s+NEXT\s+\d+\s+ROWS\s+ONLY/gi, `\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`);
+    query = query.replace(/\s+OFFSET\s+\d+\s+ROWS\s+FETCH\s+NEXT\s+\d+\s+ROWS\s+ONLY/gi, ` OFFSET ${currentOffset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`);
+    
+    // Handle ROW_NUMBER pagination pattern (for fallback queries)
+    // Pattern: FROM (SELECT *, ROW_NUMBER() OVER (...) as rn FROM ...) t WHERE t.rn > ... AND t.rn <= ...
+    query = query.replace(/WHERE\s+[^.]*\.rn\s*>\s*(\d+)\s+AND\s+[^.]*\.rn\s*<=\s*(\d+)/gi, `WHERE t.rn > ${currentOffset} AND t.rn <= ${currentOffset + pageSize}`);
+    
+    // Replace TOP clause with current page size if present
+    query = query.replace(/SELECT\s+TOP\s+\d+/gi, `SELECT TOP ${pageSize}`);
+    
+    // Get visible columns - these are database column names (not friendly names)
+    // The column.id is the database column name, regardless of display mode
     const visibleCols = tableInstance.getVisibleLeafColumns()
       .map(col => col.id)
-      .filter((id): id is string => !!id);
+      .filter((id): id is string => !!id)
+      .filter(id => !id.endsWith('_display')); // Exclude display columns from SELECT (they're added separately)
     
-    // Get all column IDs
-    const allColIds = columnIds;
+    const allColIds = columnIds.filter(id => !id.endsWith('_display'));
     
-    // Build column list
-    const columnList = visibleCols.length === allColIds.length
-      ? '*'
-      : visibleCols.map(col => `[${col}]`).join(', ');
+    // Always modify SELECT clause to ensure FK display columns are included correctly
+    // (even if all columns are visible, we need to handle FK display mode)
+    if (visibleCols.length < allColIds.length || fkDisplayMode === 'key-display' || fkDisplayMode === 'display-only') {
+      const baseTableAlias = 't';
+      
+      // Build column list for visible base columns (using database names)
+      const baseColumns = visibleCols
+        .filter(col => {
+          // In display-only mode, exclude FK key columns (they're replaced by display columns)
+          if (fkDisplayMode === 'display-only' && foreignKeyMap[col]) {
+            return false;
+          }
+          return true;
+        })
+        .map(col => `[${baseTableAlias}].[${col}]`);
+      
+      // Add display columns based on FK display mode
+      const displayColumns: string[] = [];
+      if (fkDisplayMode === 'key-display') {
+        // Add display columns for visible FK columns
+        visibleCols.forEach(col => {
+          if (foreignKeyMap[col] && data?.foreignKeyDisplays?.[col]) {
+            const alias = `fk_${col}`;
+            const displayCol = data.foreignKeyDisplays[col];
+            displayColumns.push(`${alias}.[${displayCol}] as [${col}_display]`);
+          }
+        });
+      } else if (fkDisplayMode === 'display-only') {
+        // Replace FK columns with display columns
+        visibleCols.forEach(col => {
+          if (foreignKeyMap[col] && data?.foreignKeyDisplays?.[col]) {
+            const alias = `fk_${col}`;
+            const displayCol = data.foreignKeyDisplays[col];
+            displayColumns.push(`${alias}.[${displayCol}] as [${col}]`);
+          }
+        });
+      }
+      
+      // Combine all columns
+      const allSelectedColumns = [...baseColumns, ...displayColumns];
+      const columnList = allSelectedColumns.length > 0 
+        ? allSelectedColumns.join(', ')
+        : `[${baseTableAlias}].*`;
+      
+      // Replace SELECT clause - find the first FROM and preserve everything after it (JOINs, WHERE, ORDER BY)
+      // The query structure is: SELECT ... FROM ... [JOINs] [WHERE] [ORDER BY] [OFFSET/FETCH]
+      // We need to preserve everything from FROM onwards
+      const fromIndex = query.toUpperCase().indexOf('\nFROM');
+      if (fromIndex > 0) {
+        const afterFrom = query.substring(fromIndex + 1); // +1 to include the newline
+        query = `SELECT ${columnList}\n${afterFrom}`;
+      } else {
+        // Fallback: try without newline (FROM might be on same line as SELECT)
+        const fromIndex2 = query.toUpperCase().indexOf('FROM');
+        if (fromIndex2 > 0) {
+          const afterFrom = query.substring(fromIndex2);
+          query = `SELECT ${columnList}\n${afterFrom}`;
+        } else {
+          // Last resort: use regex - but be careful to preserve JOINs
+          // Match SELECT ... FROM but stop before WHERE/ORDER BY to preserve them
+          query = query.replace(/SELECT\s+[^\n]+\s+FROM/i, `SELECT ${columnList}\nFROM`);
+        }
+      }
+    }
     
-    // Build base query
-    let query = `SELECT TOP ${pageSize} ${columnList}\nFROM [${schema}].[${table}]`;
+    // Clean up extra whitespace and newlines (but preserve structure)
+    query = query.replace(/\n{3,}/g, '\n\n').trim();
     
-    // Add ORDER BY if sorting is applied
-    if (sortColumn && sortDirection) {
-      query += `\nORDER BY [${sortColumn}] ${sortDirection.toUpperCase()}`;
+    // If FK display mode requires JOINs but they're missing, we need to add them
+    // This can happen if the base query doesn't have JOINs (e.g., if it was generated with key-only mode)
+    if ((fkDisplayMode === 'key-display' || fkDisplayMode === 'display-only') && 
+        tableStructure && 
+        !query.match(/LEFT\s+JOIN/i) && 
+        !query.match(/JOIN/i)) {
+      // Build JOINs from table structure
+      const baseTableAlias = 't';
+      const joins: string[] = [];
+      
+      tableStructure.forEach((col) => {
+        if (col.referencedSchema && col.referencedTable && col.referencedColumn) {
+          const alias = `fk_${col.columnName}`;
+          joins.push(`LEFT JOIN [${col.referencedSchema}].[${col.referencedTable}] ${alias} ON [${baseTableAlias}].[${col.columnName}] = ${alias}.[${col.referencedColumn}]`);
+        }
+      });
+      
+      if (joins.length > 0) {
+        // Insert JOINs after FROM clause
+        const fromMatch = query.match(/FROM\s+\[([^\]]+)\]\.\[([^\]]+)\]\s+([^\s\n]+)/i);
+        if (fromMatch) {
+          const fromClause = fromMatch[0];
+          const afterFrom = query.substring(query.indexOf(fromClause) + fromClause.length);
+          // Check if there's already a WHERE or ORDER BY
+          const whereIndex = afterFrom.toUpperCase().indexOf('\nWHERE');
+          const orderByIndex = afterFrom.toUpperCase().indexOf('\nORDER BY');
+          
+          if (whereIndex > 0) {
+            // Insert JOINs before WHERE
+            query = query.substring(0, query.indexOf(fromClause) + fromClause.length) + 
+                    '\n' + joins.join('\n') + 
+                    afterFrom;
+          } else if (orderByIndex > 0) {
+            // Insert JOINs before ORDER BY
+            query = query.substring(0, query.indexOf(fromClause) + fromClause.length) + 
+                    '\n' + joins.join('\n') + 
+                    afterFrom;
+          } else {
+            // No WHERE or ORDER BY, add JOINs after FROM
+            query = query.substring(0, query.indexOf(fromClause) + fromClause.length) + 
+                    '\n' + joins.join('\n') + 
+                    afterFrom;
+          }
+        }
+      }
+    }
+    
+    // Ensure pagination is present - if no pagination found, add it after ORDER BY
+    if (!query.match(/OFFSET\s+\d+\s+ROWS/i) && !query.match(/\.rn\s*>/i)) {
+      // Find ORDER BY clause
+      const orderByMatch = query.match(/(ORDER\s+BY\s+[^\n]+)/i);
+      if (orderByMatch) {
+        // Add pagination after ORDER BY
+        query = query.replace(/(ORDER\s+BY\s+[^\n]+)/i, `$1\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`);
+      } else {
+        // No ORDER BY, add pagination at the end
+        query += `\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
+      }
     }
     
     return query;
-  }, [schema, table, tableInstance, columnIds, pageSize, sortColumn, sortDirection]);
+  }, [
+    schema, 
+    table, 
+    tableInstance, 
+    columnIds,
+    fkDisplayMode,
+    foreignKeyMap,
+    data?.query,
+    data?.foreignKeyDisplays,
+    page,
+    pageSize
+  ]);
 
   const handleCreateQuery = useCallback(() => {
     if (!onCreateQuery) return;
@@ -797,7 +1046,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
     
     // Add headers only for multiple columns
     if (includeHeaders) {
-      lines.push(selectedColumns.join('\t'));
+      const formattedHeaders = selectedColumns.map(colId => formatName(colId, nameDisplayMode));
+      lines.push(formattedHeaders.join('\t'));
     }
     
     // Add data rows
@@ -807,7 +1057,31 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
         if (value === null || value === undefined) {
           return '';
         }
-        const str = String(value);
+        
+        // Check if this is a foreign key column
+        const isFkColumn = foreignKeyMap[colId] !== undefined;
+        const displayColumn = `${colId}_display`;
+        const displayValue = row[displayColumn];
+        
+        let str: string;
+        if (fkDisplayMode === 'display-only' && isFkColumn) {
+          // In display-only mode, FK key columns are removed and display columns are renamed to FK column names
+          // So row[colId] already contains the display value (not the key)
+          str = String(value);
+        } else if (isFkColumn && displayValue !== null && displayValue !== undefined) {
+          // This is a FK column with display value available
+          if (fkDisplayMode === 'key-display') {
+            // Format as "key - display" (same as displayed in UI: "123 - Product Name")
+            str = `${String(value)} - ${String(displayValue)}`;
+          } else {
+            // key-only mode: just the key value
+            str = String(value);
+          }
+        } else {
+          // Not a FK column or no display value, use value as-is
+          str = String(value);
+        }
+        
         // Escape tabs and newlines
         return str.replace(/\t/g, ' ').replace(/\n/g, ' ').replace(/\r/g, '');
       });
@@ -839,7 +1113,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
         console.error('Fallback copy method error:', fallbackError);
       }
     }
-  }, [selection, data?.data, visibleColumnIds]);
+  }, [selection, data?.data, visibleColumnIds, fkDisplayMode, foreignKeyMap, nameDisplayMode]);
 
   // Handle mouse up
   useEffect(() => {
@@ -922,9 +1196,29 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
   }
 
   if (error) {
+    // Check if it's a timeout error
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    const isTimeout = errorMessage.toLowerCase().includes('timeout') || 
+                     (error as any)?.data?.timeout === true;
+    
     return (
-      <div className="flex items-center justify-center h-64 text-sm text-destructive">
-        Error loading data: {error instanceof Error ? error.message : 'Unknown error'}
+      <div className="flex flex-col items-center justify-center h-64 p-4 text-sm">
+        <div className="text-destructive font-semibold mb-2">
+          {isTimeout ? 'Query Timeout' : 'Error loading data'}
+        </div>
+        <div className="text-muted-foreground text-center mb-4">
+          {errorMessage}
+        </div>
+        {isTimeout && (
+          <div className="text-xs text-muted-foreground text-center space-y-2">
+            <p>Suggestions:</p>
+            <ul className="list-disc list-inside space-y-1">
+              <li>Change foreign key display mode using the FK dropdown</li>
+              <li>Reduce the page size</li>
+              <li>Add filters to limit the result set</li>
+            </ul>
+          </div>
+        )}
       </div>
     );
   }
@@ -954,6 +1248,48 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
           )}
         </div>
         <div className="flex items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                title="Foreign key display mode"
+              >
+                <Link2 className="h-3 w-3 mr-1.5" />
+                FK: {fkDisplayMode === 'key-only' ? 'Key Only' : fkDisplayMode === 'key-display' ? 'Key - Display' : 'Display Only'}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem
+                onClick={() => {
+                  setFkDisplayMode('key-only');
+                  saveFkDisplayMode('key-only');
+                }}
+                className={fkDisplayMode === 'key-only' ? 'bg-accent' : ''}
+              >
+                Key Only
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  setFkDisplayMode('key-display');
+                  saveFkDisplayMode('key-display');
+                }}
+                className={fkDisplayMode === 'key-display' ? 'bg-accent' : ''}
+              >
+                Key - Display
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => {
+                  setFkDisplayMode('display-only');
+                  saveFkDisplayMode('display-only');
+                }}
+                className={fkDisplayMode === 'display-only' ? 'bg-accent' : ''}
+              >
+                Display Only
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           {onCreateQuery && (
             <Button 
               variant="outline" 
@@ -999,7 +1335,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
                       }}
                       className="text-xs flex-1 p-0 h-auto hover:bg-transparent"
                     >
-                      {columnId}
+                      {formatName(columnId, nameDisplayMode)}
                     </DropdownMenuCheckboxItem>
                     <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
@@ -1480,7 +1816,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery }: DataGr
             <div className="flex items-center gap-2">
               <Input
                 type="text"
-                placeholder={`Filter ${columnId}...`}
+                placeholder={`Filter ${formatName(columnId, nameDisplayMode)}...`}
                 value={filterValue}
                 onChange={(e) => {
                   const value = e.target.value;

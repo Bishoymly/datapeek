@@ -104,7 +104,23 @@ export async function connect(config: ConnectionConfig | string): Promise<void> 
     ? parseConnectionString(config)
     : config;
   
-  pool = new sql.ConnectionPool(connectionConfig);
+  // Add timeout configuration to connection pool
+  const poolConfig: any = {
+    ...connectionConfig,
+    connectionTimeout: 30000, // 30 seconds for connection
+    pool: {
+      max: 10,
+      min: 0,
+      idleTimeoutMillis: 30000,
+      acquireTimeoutMillis: 30000
+    },
+    options: {
+      ...connectionConfig.options,
+      requestTimeout: 120000 // 2 minutes for queries (increased for complex queries with JOINs)
+    }
+  };
+  
+  pool = new sql.ConnectionPool(poolConfig);
   
   try {
     await pool.connect();
@@ -138,6 +154,8 @@ export async function executeQuery(
   }
   
   const request = pool.request();
+  // Set request timeout (overrides pool default if needed)
+  request.timeout = 120000; // 2 minutes
   
   if (parameters) {
     for (const param of parameters) {
@@ -149,8 +167,19 @@ export async function executeQuery(
     }
   }
   
-  const result = await request.query(query);
-  return result.recordset || [];
+  try {
+    const result = await request.query(query);
+    return result.recordset || [];
+  } catch (error: any) {
+    // Enhance timeout error messages
+    if (error.code === 'ETIMEOUT' || error.code === 'ESOCKET' || error.message?.includes('timeout') || error.message?.includes('ETIMEDOUT')) {
+      const timeoutError: any = new Error('Query execution timeout. The query took too long to execute. Try disabling foreign key displays or reducing the page size.');
+      timeoutError.code = 'ETIMEOUT';
+      timeoutError.originalError = error;
+      throw timeoutError;
+    }
+    throw error;
+  }
 }
 
 export async function executeQueryMultiple(
@@ -162,6 +191,8 @@ export async function executeQueryMultiple(
   }
   
   const request = pool.request();
+  // Set request timeout (overrides pool default if needed)
+  request.timeout = 120000; // 2 minutes
   
   if (parameters) {
     for (const param of parameters) {
@@ -173,7 +204,18 @@ export async function executeQueryMultiple(
     }
   }
   
-  const result = await request.query(query);
-  // Return all result sets (recordsets is an array of arrays)
-  return result.recordsets || [];
+  try {
+    const result = await request.query(query);
+    // Return all result sets (recordsets is an array of arrays)
+    return result.recordsets || [];
+  } catch (error: any) {
+    // Enhance timeout error messages
+    if (error.code === 'ETIMEOUT' || error.code === 'ESOCKET' || error.message?.includes('timeout') || error.message?.includes('ETIMEDOUT')) {
+      const timeoutError: any = new Error('Query execution timeout. The query took too long to execute. Try simplifying your query or reducing the result set size.');
+      timeoutError.code = 'ETIMEOUT';
+      timeoutError.originalError = error;
+      throw timeoutError;
+    }
+    throw error;
+  }
 }

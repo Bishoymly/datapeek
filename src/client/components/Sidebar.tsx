@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Table } from '@/lib/api';
+import { formatName } from '@/lib/nameFormatter';
 import { Database, Table as TableIcon, ChevronRight, ChevronDown, Search, Star, ChevronUp, X, ChevronLeft, FileText, Plus } from 'lucide-react';
 import { Input } from './ui/input';
 import { cn } from '@/lib/utils';
@@ -12,6 +13,7 @@ interface SidebarProps {
   selectedQuery?: string;
   queriesUpdated?: number; // Timestamp to trigger refresh
   favoritesUpdated?: number; // Timestamp to trigger refresh
+  nameDisplayMode?: 'database-names' | 'friendly-names';
 }
 
 interface FavoriteTable {
@@ -123,7 +125,7 @@ function createNewQuery(): SavedQuery {
   return newQuery;
 }
 
-export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQuery, queriesUpdated, favoritesUpdated }: SidebarProps) {
+export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQuery, queriesUpdated, favoritesUpdated, nameDisplayMode = 'database-names' }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(['Favorites', 'Queries']));
   const [favorites, setFavorites] = useState<FavoriteTable[]>(getFavorites());
@@ -340,8 +342,8 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
                           )}
                         >
                           <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                          <span className="flex-1 truncate">{fav.tableInfo.tableName}</span>
-                          <span className="text-xs opacity-60 truncate">{fav.schema}</span>
+                          <span className="flex-1 truncate">{formatName(fav.tableInfo.tableName, nameDisplayMode)}</span>
+                          <span className="text-xs opacity-60 truncate">{formatName(fav.schema, nameDisplayMode)}</span>
                         </button>
                       );
                     })}
@@ -434,7 +436,7 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
                     ) : (
                       <ChevronRight className="h-3.5 w-3.5" />
                     )}
-                    <span className="flex-1 truncate">{schema}</span>
+                    <span className="flex-1 truncate">{schema === 'Favorites' || schema === 'Queries' ? schema : formatName(schema, nameDisplayMode)}</span>
                     <span className="text-xs text-muted-foreground">{filteredTables.length}</span>
                   </button>
 
@@ -457,7 +459,7 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
                             )}
                           >
                             <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                            <span className="flex-1 truncate">{table.tableName}</span>
+                            <span className="flex-1 truncate">{formatName(table.tableName, nameDisplayMode)}</span>
                           </button>
                         );
                       })}

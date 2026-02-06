@@ -24,6 +24,9 @@ export interface Column {
   isNullable: string;
   defaultValue: string | null;
   isPrimaryKey: number;
+  referencedSchema?: string | null;
+  referencedTable?: string | null;
+  referencedColumn?: string | null;
 }
 
 export interface TableData {
@@ -35,6 +38,8 @@ export interface TableData {
     total: number;
     totalPages: number;
   };
+  foreignKeyDisplays?: Record<string, string>;
+  fkDisplayMode?: 'key-only' | 'key-display' | 'display-only';
 }
 
 export const api = {
@@ -113,7 +118,8 @@ export const api = {
     pageSize: number = 100,
     sortColumn?: string,
     sortDirection?: 'asc' | 'desc',
-    filters?: Record<string, string>
+    filters?: Record<string, string>,
+    fkDisplayMode: 'key-only' | 'key-display' | 'display-only' = 'key-only'
   ): Promise<TableData> {
     const params = new URLSearchParams({
       page: page.toString(),
@@ -130,6 +136,7 @@ export const api = {
         }
       });
     }
+    params.append('fkDisplayMode', fkDisplayMode);
     
     const res = await fetch(
       `${API_BASE}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/data?${params.toString()}`
@@ -139,7 +146,12 @@ export const api = {
       const errorMsg = errorData.details 
         ? `${errorData.error}: ${errorData.details}`
         : errorData.error || `Failed to fetch table data: ${res.status} ${res.statusText}`;
-      throw new Error(errorMsg);
+      const error = new Error(errorMsg);
+      // Preserve timeout flag for UI display
+      if (errorData.timeout) {
+        (error as any).data = { timeout: true };
+      }
+      throw error;
     }
     return res.json();
   },
@@ -153,6 +165,33 @@ export const api = {
     if (!res.ok) {
       const error = await res.json();
       throw new Error(error.error || 'Query failed');
+    }
+    return res.json();
+  },
+
+  async getRelatedData(
+    schema: string,
+    table: string,
+    foreignKeyColumn: string,
+    referencedSchema: string,
+    referencedTable: string,
+    referencedColumn: string,
+    ids: any[]
+  ): Promise<{ dataMap: Record<string, any>; displayColumn: string | null }> {
+    const res = await fetch(`${API_BASE}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/related-data`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        foreignKeyColumn,
+        referencedSchema,
+        referencedTable,
+        referencedColumn,
+        ids,
+      }),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || 'Failed to fetch related data');
     }
     return res.json();
   },

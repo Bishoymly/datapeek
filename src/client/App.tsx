@@ -6,7 +6,8 @@ import { DataGrid } from './components/DataGrid';
 import { QueryEditor } from './components/QueryEditor';
 import { QueryEditorEnhanced } from './components/QueryEditorEnhanced';
 import { api } from './lib/api';
-import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon } from 'lucide-react';
+import { getNameDisplayMode, saveNameDisplayMode, formatName } from './lib/nameFormatter';
+import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from './components/ui/button';
 import { ThemeToggle } from './components/ThemeToggle';
@@ -41,6 +42,7 @@ function AppContent() {
   const [editingQueryNameValue, setEditingQueryNameValue] = useState<string>('');
   const queryNameInputRef = useRef<HTMLInputElement>(null);
   const [favoritesUpdated, setFavoritesUpdated] = useState<number>(0);
+  const [nameDisplayMode, setNameDisplayMode] = useState<'database-names' | 'friendly-names'>(() => getNameDisplayMode());
 
   // Get query name for display (without .sql extension)
   const getQueryName = (queryId: string | undefined): string | undefined => {
@@ -481,11 +483,46 @@ function AppContent() {
             {selectedTable && (
               <>
                 <span className="text-muted-foreground">/</span>
-                <span className="text-sm text-muted-foreground">{selectedTable.schema}.{selectedTable.table}</span>
+                <span className="text-sm text-muted-foreground">{formatName(selectedTable.schema, nameDisplayMode)}.{formatName(selectedTable.table, nameDisplayMode)}</span>
               </>
             )}
           </div>
           <div className="flex items-center gap-2">
+            {connected && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs"
+                    title="Name display mode"
+                  >
+                    <Tag className="h-3 w-3 mr-1.5" />
+                    {nameDisplayMode === 'database-names' ? 'Database Names' : 'Friendly Names'}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setNameDisplayMode('database-names');
+                      saveNameDisplayMode('database-names');
+                    }}
+                    className={nameDisplayMode === 'database-names' ? 'bg-accent' : ''}
+                  >
+                    Database Names
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setNameDisplayMode('friendly-names');
+                      saveNameDisplayMode('friendly-names');
+                    }}
+                    className={nameDisplayMode === 'friendly-names' ? 'bg-accent' : ''}
+                  >
+                    Friendly Names
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             <ThemeToggle />
             {connected && (
               <DropdownMenu>
@@ -549,6 +586,7 @@ function AppContent() {
               selectedQuery={selectedQuery}
               queriesUpdated={queriesUpdated}
               favoritesUpdated={favoritesUpdated}
+              nameDisplayMode={nameDisplayMode}
             />
           </div>
 
@@ -614,7 +652,7 @@ function AppContent() {
               <div className="border-b flex items-center justify-between bg-tabs-bg dark:bg-tabs-bg">
                 <div className="flex items-center gap-2 px-4 py-2 border-b-2 border-primary">
                   <span className="text-sm font-medium">
-                    {selectedTable.schema}.{selectedTable.table}
+                    {formatName(selectedTable.schema, nameDisplayMode)}.{formatName(selectedTable.table, nameDisplayMode)}
                   </span>
                 </div>
                 <div className="flex items-center gap-1 px-4 py-2">
@@ -674,6 +712,7 @@ function AppContent() {
                     table={selectedTable.table}
                     onQueryChange={setTableQuery}
                     onCreateQuery={handleCreateQueryFromGrid}
+                    nameDisplayMode={nameDisplayMode}
                   />
                 ) : (
                   <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
