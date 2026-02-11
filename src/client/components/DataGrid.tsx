@@ -1224,6 +1224,45 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
   }
 
   if (!data || data.data.length === 0) {
+    // Show headers even when no data if we have table structure
+    if (tableStructure && tableStructure.length > 0) {
+      const columnNames = tableStructure.map(col => col.columnName);
+      return (
+        <div className="flex flex-col h-full bg-grid-bg dark:bg-grid-bg">
+          <div className="border-b p-2 flex items-center justify-between bg-muted/30">
+            <div className="text-sm text-muted-foreground flex items-center gap-2">
+              Showing 0 of 0 rows
+            </div>
+          </div>
+          <div className="flex-1 overflow-auto">
+            <table className="w-full border-collapse">
+              <thead className="sticky top-0 bg-muted z-10">
+                <tr>
+                  <th className="border-b border-r border-border/50 p-2 text-xs font-medium text-muted-foreground select-none bg-muted/30 w-12 text-center">
+                  </th>
+                  {columnNames.map((colName) => (
+                    <th
+                      key={colName}
+                      className="border-b border-r border-border/50 p-2 text-left text-xs font-medium text-muted-foreground last:border-r-0"
+                    >
+                      {formatName(colName, nameDisplayMode)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td colSpan={columnNames.length + 1} className="p-4 text-sm text-muted-foreground text-center">
+                    No data found
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+    
     return (
       <div className="flex items-center justify-center h-64 text-sm text-muted-foreground">
         No data found

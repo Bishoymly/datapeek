@@ -14,7 +14,7 @@ queryRoutes.post('/', async (req, res) => {
     
     const startTime = Date.now();
     // Use executeQueryMultiple to get all result sets
-    const resultSets = await executeQueryMultiple(sqlQuery);
+    const { recordsets: resultSets, columnMetadata } = await executeQueryMultiple(sqlQuery);
     const executionTime = Date.now() - startTime;
     
     // Always return resultSets array (even if single result set for consistency)
@@ -22,7 +22,8 @@ queryRoutes.post('/', async (req, res) => {
     res.json({ 
       data: resultSets[0] || [], 
       resultSets: resultSets.length > 0 ? resultSets : [],
-      executionTime 
+      executionTime,
+      columnMetadata // Include column metadata for empty result sets
     });
   } catch (error: any) {
     // Check if it's an authentication error

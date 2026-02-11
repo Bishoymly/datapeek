@@ -5,6 +5,7 @@ import { Play, Loader2, AlertCircle, CheckCircle2, Clock, Download } from 'lucid
 import { api } from '@/lib/api';
 import { DataGrid } from './DataGrid';
 import * as XLSX from 'xlsx';
+import { cn } from '@/lib/utils';
 
 const QUERIES_STORAGE_KEY = 'datapeek_queries';
 
@@ -26,6 +27,15 @@ interface QueryResult {
   error?: string;
   executionTime?: number;
   rowsAffected?: number;
+}
+
+interface CellSelection {
+  startRow: number;
+  startCol: string;
+  endRow: number;
+  endCol: string;
+  selectionType?: 'cell' | 'row' | 'column';
+  resultSetIndex?: number; // For multiple result sets
 }
 
 function getQueries(): SavedQuery[] {
@@ -112,6 +122,307 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
   const [queryResultSets, setQueryResultSets] = useState<any[][]>([]);
   const [queryError, setQueryError] = useState<Error | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  
+  // Selection state - one per result set
+  const [selections, setSelections] = useState<Map<number, CellSelection | null>>(new Map());
+  const [isSelecting, setIsSelecting] = useState<Map<number, boolean>>(new Map());
+  const resultsTableRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  // Store column keys from successful queries per result set
+  const [lastColumnKeys, setLastColumnKeys] = useState<Map<number, string[]>>(new Map());
+
+  // Selection helpers
+  const getColumnKeys = useCallback((resultSet: any[]): string[] => {
+    if (!resultSet || resultSet.length === 0) return [];
+    return Object.keys(resultSet[0]);
+  }, []);
+
+  const isCellSelected = useCallback((rowIndex: number, columnKey: string, resultSetIndex: number) => {
+    const selection = selections.get(resultSetIndex);
+    if (!selection) return false;
+    
+    const selectionType = selection.selectionType || 'cell';
+    const columnKeys = getColumnKeys(queryResultSets[resultSetIndex] || []);
+    const colIdx = columnKeys.indexOf(columnKey);
+    const startColIdx = columnKeys.indexOf(selection.startCol);
+    const endColIdx = columnKeys.indexOf(selection.endCol);
+    
+    if (selectionType === 'row') {
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+      return rowIndex >= minRow && rowIndex <= maxRow;
+    } else if (selectionType === 'column') {
+      const minColIdx = Math.min(startColIdx, endColIdx);
+      const maxColIdx = Math.max(startColIdx, endColIdx);
+      return colIdx >= minColIdx && colIdx <= maxColIdx;
+    } else {
+      const minRow = Math.min(selection.startRow, selection.endRow);
+      const maxRow = Math.max(selection.startRow, selection.endRow);
+      const minColIdx = Math.min(startColIdx, endColIdx);
+      const maxColIdx = Math.max(startColIdx, endColIdx);
+      return rowIndex >= minRow && rowIndex <= maxRow && 
+             colIdx >= minColIdx && colIdx <= maxColIdx;
+    }
+  }, [selections, queryResultSets, getColumnKeys]);
+
+  const handleCellMouseDown = useCallback((e: React.MouseEvent, rowIndex: number, columnKey: string, resultSetIndex: number) => {
+    if ((e.target as HTMLElement).closest('button') || 
+        (e.target as HTMLElement).closest('a')) {
+      return;
+    }
+    
+    e.preventDefault();
+    setIsSelecting(prev => new Map(prev).set(resultSetIndex, true));
+    setSelections(prev => {
+      const newSelections = new Map(prev);
+      newSelections.set(resultSetIndex, {
+        startRow: rowIndex,
+        startCol: columnKey,
+        endRow: rowIndex,
+        endCol: columnKey,
+        selectionType: 'cell',
+        resultSetIndex,
+      });
+      return newSelections;
+    });
+  }, []);
+
+  const handleRowHeaderClick = useCallback((e: React.MouseEvent, rowIndex: number, resultSetIndex: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsSelecting(prev => new Map(prev).set(resultSetIndex, true));
+    const columnKeys = getColumnKeys(queryResultSets[resultSetIndex] || []);
+    if (columnKeys.length === 0) return;
+    
+    setSelections(prev => {
+      const newSelections = new Map(prev);
+      newSelections.set(resultSetIndex, {
+        startRow: rowIndex,
+        startCol: columnKeys[0],
+        endRow: rowIndex,
+        endCol: columnKeys[columnKeys.length - 1],
+        selectionType: 'row',
+        resultSetIndex,
+      });
+      return newSelections;
+    });
+  }, [queryResultSets, getColumnKeys]);
+
+  const handleColumnHeaderClick = useCallback((e: React.MouseEvent, columnKey: string, resultSetIndex: number) => {
+    if ((e.target as HTMLElement).closest('button') || 
+        (e.target as HTMLElement).closest('a')) {
+      return;
+    }
+    
+    e.preventDefault();
+    e.stopPropagation();
+    setIsSelecting(prev => new Map(prev).set(resultSetIndex, true));
+    const resultSet = queryResultSets[resultSetIndex] || [];
+    if (resultSet.length === 0) return;
+    
+    setSelections(prev => {
+      const newSelections = new Map(prev);
+      newSelections.set(resultSetIndex, {
+        startRow: 0,
+        startCol: columnKey,
+        endRow: resultSet.length - 1,
+        endCol: columnKey,
+        selectionType: 'column',
+        resultSetIndex,
+      });
+      return newSelections;
+    });
+  }, [queryResultSets]);
+
+  const handleCellMouseEnter = useCallback((rowIndex: number, columnKey: string, resultSetIndex: number) => {
+    const selecting = isSelecting.get(resultSetIndex);
+    const selection = selections.get(resultSetIndex);
+    if (!selecting || !selection) return;
+    
+    const selectionType = selection.selectionType || 'cell';
+    if (selectionType === 'row') {
+      setSelections(prev => {
+        const newSelections = new Map(prev);
+        const current = newSelections.get(resultSetIndex);
+        if (current) {
+          newSelections.set(resultSetIndex, { ...current, endRow: rowIndex });
+        }
+        return newSelections;
+      });
+    } else if (selectionType === 'column') {
+      setSelections(prev => {
+        const newSelections = new Map(prev);
+        const current = newSelections.get(resultSetIndex);
+        if (current) {
+          newSelections.set(resultSetIndex, { ...current, endCol: columnKey });
+        }
+        return newSelections;
+      });
+    } else {
+      setSelections(prev => {
+        const newSelections = new Map(prev);
+        const current = newSelections.get(resultSetIndex);
+        if (current) {
+          newSelections.set(resultSetIndex, { ...current, endRow: rowIndex, endCol: columnKey });
+        }
+        return newSelections;
+      });
+    }
+  }, [isSelecting, selections]);
+
+  const handleRowHeaderMouseEnter = useCallback((rowIndex: number, resultSetIndex: number) => {
+    const selecting = isSelecting.get(resultSetIndex);
+    const selection = selections.get(resultSetIndex);
+    if (!selecting || !selection || selection.selectionType !== 'row') return;
+    
+    setSelections(prev => {
+      const newSelections = new Map(prev);
+      const current = newSelections.get(resultSetIndex);
+      if (current) {
+        newSelections.set(resultSetIndex, { ...current, endRow: rowIndex });
+      }
+      return newSelections;
+    });
+  }, [isSelecting, selections]);
+
+  const copySelectionToClipboard = useCallback(async (resultSetIndex: number) => {
+    const selection = selections.get(resultSetIndex);
+    const resultSet = queryResultSets[resultSetIndex];
+    if (!selection || !resultSet || resultSet.length === 0) return;
+
+    const selectionType = selection.selectionType || 'cell';
+    const columnKeys = getColumnKeys(resultSet);
+    const minRow = Math.min(selection.startRow, selection.endRow);
+    const maxRow = Math.max(selection.startRow, selection.endRow);
+    const startColIdx = columnKeys.indexOf(selection.startCol);
+    const endColIdx = columnKeys.indexOf(selection.endCol);
+    
+    if (startColIdx === -1 || endColIdx === -1) return;
+    
+    const minColIdx = Math.min(startColIdx, endColIdx);
+    const maxColIdx = Math.max(startColIdx, endColIdx);
+
+    let selectedColumns: string[];
+    let selectedRows: any[];
+
+    if (selectionType === 'row') {
+      selectedColumns = columnKeys;
+      selectedRows = resultSet.slice(minRow, maxRow + 1);
+    } else if (selectionType === 'column') {
+      selectedColumns = columnKeys.slice(minColIdx, maxColIdx + 1);
+      selectedRows = resultSet;
+    } else {
+      selectedColumns = columnKeys.slice(minColIdx, maxColIdx + 1);
+      selectedRows = resultSet.slice(minRow, maxRow + 1);
+    }
+
+    const isSingleCell = selectionType === 'cell' && minRow === maxRow && minColIdx === maxColIdx;
+    const isSingleColumn = selectionType === 'column' && selectedColumns.length === 1;
+    const includeHeaders = !isSingleCell && !isSingleColumn && selectedColumns.length > 1;
+
+    const lines: string[] = [];
+    
+    if (includeHeaders) {
+      lines.push(selectedColumns.join('\t'));
+    }
+    
+    selectedRows.forEach((row) => {
+      const values = selectedColumns.map((colKey) => {
+        const value = row[colKey];
+        if (value === null || value === undefined) {
+          return '';
+        }
+        const str = String(value);
+        return str.replace(/\t/g, ' ').replace(/\n/g, ' ').replace(/\r/g, '');
+      });
+      lines.push(values.join('\t'));
+    });
+
+    const text = lines.join('\n');
+    
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (error) {
+      console.error('Failed to copy to clipboard:', error);
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+      } catch (fallbackError) {
+        console.error('Fallback copy method error:', fallbackError);
+      }
+    }
+  }, [selections, queryResultSets, getColumnKeys]);
+
+  // Handle mouse up
+  useEffect(() => {
+    const handleMouseUp = () => {
+      setIsSelecting(new Map());
+    };
+    
+    const hasSelecting = Array.from(isSelecting.values()).some(v => v);
+    if (hasSelecting) {
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => document.removeEventListener('mouseup', handleMouseUp);
+    }
+  }, [isSelecting]);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeResultSetIndex = Array.from(selections.keys())[0] ?? 0;
+      const selection = selections.get(activeResultSetIndex);
+      
+      if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+        const tableRef = resultsTableRefs.current.get(activeResultSetIndex);
+        const isTableFocused = tableRef?.contains(document.activeElement) || 
+                               document.activeElement === tableRef;
+        
+        if (isTableFocused && queryResultSets[activeResultSetIndex]) {
+          e.preventDefault();
+          const resultSet = queryResultSets[activeResultSetIndex];
+          const columnKeys = getColumnKeys(resultSet);
+          if (resultSet.length > 0 && columnKeys.length > 0) {
+            setSelections(prev => {
+              const newSelections = new Map(prev);
+              newSelections.set(activeResultSetIndex, {
+                startRow: 0,
+                startCol: columnKeys[0],
+                endRow: resultSet.length - 1,
+                endCol: columnKeys[columnKeys.length - 1],
+                selectionType: 'cell',
+                resultSetIndex: activeResultSetIndex,
+              });
+              return newSelections;
+            });
+          }
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selection) {
+        const activeElement = document.activeElement;
+        const isInputElement = activeElement && (
+          activeElement.tagName === 'INPUT' ||
+          activeElement.tagName === 'TEXTAREA' ||
+          (activeElement as HTMLElement).isContentEditable
+        );
+        
+        if (!isInputElement) {
+          e.preventDefault();
+          copySelectionToClipboard(activeResultSetIndex).catch((error) => {
+            console.error('Failed to copy selection:', error);
+          });
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selections, queryResultSets, getColumnKeys, copySelectionToClipboard]);
 
   // Export functions
   const exportToCSV = useCallback(() => {
@@ -265,7 +576,31 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
   }, [query]);
 
   const handleExecute = async () => {
-    if (!query.trim() || isExecuting) return;
+    if (isExecuting) return;
+    
+    // Check if there's a text selection in the editor
+    let queryToExecute = query;
+    let editorSelection: any = null;
+    
+    if (editorRef.current) {
+      const editor = editorRef.current;
+      const selection = editor.getSelection();
+      if (selection && !selection.isEmpty()) {
+        const model = editor.getModel();
+        if (model) {
+          queryToExecute = model.getValueInRange(selection);
+          // Save selection to restore later
+          editorSelection = {
+            startLineNumber: selection.startLineNumber,
+            startColumn: selection.startColumn,
+            endLineNumber: selection.endLineNumber,
+            endColumn: selection.endColumn,
+          };
+        }
+      }
+    }
+    
+    if (!queryToExecute.trim()) return;
     
     setIsExecuting(true);
     setQueryError(null);
@@ -273,7 +608,7 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
     setMessages([]); // Reset messages when executing a new query
     
     try {
-      const result = await api.executeQuery(query);
+      const result = await api.executeQuery(queryToExecute);
       const execTime = result.executionTime || 0;
       setExecutionTime(execTime);
       
@@ -282,6 +617,15 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
         ? result.resultSets 
         : (result.data ? [result.data] : []);
       setQueryResultSets(resultSets);
+      
+      // Store column metadata for empty result sets
+      if (result.columnMetadata && result.columnMetadata.length > 0) {
+        const newColumnKeys = new Map<number, string[]>();
+        result.columnMetadata.forEach((meta: { resultSetIndex: number; columns: string[] }) => {
+          newColumnKeys.set(meta.resultSetIndex, meta.columns);
+        });
+        setLastColumnKeys(newColumnKeys);
+      }
       
       const totalRows = resultSets.reduce((sum, rs) => sum + rs.length, 0);
       const resultSetCount = resultSets.length;
@@ -305,6 +649,43 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
         executionTime: execTime,
         messages: newMessages,
       });
+      
+      // Store column keys from successful queries
+      const newColumnKeys = new Map<number, string[]>();
+      resultSets.forEach((resultSet, index) => {
+        if (resultSet.length > 0) {
+          const columnKeys = getColumnKeys(resultSet);
+          if (columnKeys.length > 0) {
+            newColumnKeys.set(index, columnKeys);
+          }
+        }
+      });
+      setLastColumnKeys(newColumnKeys);
+      
+      // Clear selections when new results arrive
+      setSelections(new Map());
+      setIsSelecting(new Map());
+      
+      // Restore editor selection after execution completes
+      if (editorSelection && editorRef.current) {
+        setTimeout(() => {
+          if (editorRef.current) {
+            const editor = editorRef.current;
+            const model = editor.getModel();
+            if (model) {
+              // Restore the selection
+              editor.setSelection({
+                startLineNumber: editorSelection.startLineNumber,
+                startColumn: editorSelection.startColumn,
+                endLineNumber: editorSelection.endLineNumber,
+                endColumn: editorSelection.endColumn,
+              });
+              // Optionally focus the editor to show the selection
+              editor.focus();
+            }
+          }
+        }, 100);
+      }
     } catch (err: any) {
       const execTime = 0;
       setExecutionTime(null);
@@ -325,6 +706,27 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
         executionTime: null,
         messages: newMessages,
       });
+      
+      // Restore editor selection even on error
+      if (editorSelection && editorRef.current) {
+        setTimeout(() => {
+          if (editorRef.current) {
+            const editor = editorRef.current;
+            const model = editor.getModel();
+            if (model) {
+              // Restore the selection
+              editor.setSelection({
+                startLineNumber: editorSelection.startLineNumber,
+                startColumn: editorSelection.startColumn,
+                endLineNumber: editorSelection.endLineNumber,
+                endColumn: editorSelection.endColumn,
+              });
+              // Optionally focus the editor to show the selection
+              editor.focus();
+            }
+          }
+        }, 100);
+      }
     } finally {
       setIsExecuting(false);
     }
@@ -579,6 +981,20 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
             )}
             {queryResultSets.length > 0 && (
               <div className="flex items-center gap-1">
+                {Array.from(selections.values()).some(s => s !== null) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-6 px-2 text-xs"
+                    onClick={() => {
+                      const firstSelectedIndex = Array.from(selections.keys()).find(i => selections.get(i) !== null) ?? 0;
+                      copySelectionToClipboard(firstSelectedIndex);
+                    }}
+                    title="Copy selection (Ctrl+C)"
+                  >
+                    Copy
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -619,7 +1035,48 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
               // Single result set - show directly without header
               (() => {
                 const resultSet = queryResultSets[0];
+                const resultSetIndex = 0;
+                const columnKeys = resultSet.length > 0 
+                  ? getColumnKeys(resultSet) 
+                  : (lastColumnKeys.get(resultSetIndex) || []);
+                
                 if (resultSet.length === 0) {
+                  if (columnKeys.length > 0) {
+                    // Show headers even when no rows if we have column info
+                    return (
+                      <div 
+                        ref={(el) => {
+                          if (el) resultsTableRefs.current.set(resultSetIndex, el);
+                        }}
+                        className="overflow-auto h-full"
+                        tabIndex={0}
+                      >
+                        <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
+                          <thead className="sticky top-0 bg-muted z-10">
+                            <tr>
+                              <th className="border-b border-r border-border/50 p-2 text-xs text-muted-foreground select-none bg-muted/30 w-12 text-center" />
+                              {columnKeys.map((key) => (
+                                <th 
+                                  key={key} 
+                                  className="border-b p-2 text-left font-medium text-muted-foreground"
+                                >
+                                  {key}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            <tr>
+                              <td colSpan={columnKeys.length + 1} className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
+                                <CheckCircle2 className="h-4 w-4" />
+                                No rows returned
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  }
                   return (
                     <div className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
                       <CheckCircle2 className="h-4 w-4" />
@@ -628,31 +1085,95 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
                   );
                 }
                 return (
-                  <div className="overflow-auto h-full">
+                  <div 
+                    ref={(el) => {
+                      if (el) resultsTableRefs.current.set(resultSetIndex, el);
+                    }}
+                    className="overflow-auto h-full"
+                    tabIndex={0}
+                    onMouseLeave={() => setIsSelecting(prev => {
+                      const newMap = new Map(prev);
+                      newMap.set(resultSetIndex, false);
+                      return newMap;
+                    })}
+                  >
                     <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
-                      <thead className="sticky top-0 bg-muted">
+                      <thead className="sticky top-0 bg-muted z-10">
                         <tr>
-                          {Object.keys(resultSet[0]).map((key) => (
-                            <th key={key} className="border-b p-2 text-left font-medium text-muted-foreground">
+                          <th
+                            className="border-b border-r border-border/50 p-2 text-xs text-muted-foreground select-none cursor-pointer bg-muted/30 w-12 text-center"
+                            title="Select All"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (resultSet.length > 0 && columnKeys.length > 0) {
+                                setIsSelecting(prev => new Map(prev).set(resultSetIndex, true));
+                                setSelections(prev => {
+                                  const newSelections = new Map(prev);
+                                  newSelections.set(resultSetIndex, {
+                                    startRow: 0,
+                                    startCol: columnKeys[0],
+                                    endRow: resultSet.length - 1,
+                                    endCol: columnKeys[columnKeys.length - 1],
+                                    selectionType: 'cell',
+                                    resultSetIndex,
+                                  });
+                                  return newSelections;
+                                });
+                              }
+                            }}
+                          />
+                          {columnKeys.map((key) => (
+                            <th 
+                              key={key} 
+                              className="border-b p-2 text-left font-medium text-muted-foreground cursor-pointer"
+                              onMouseDown={(e) => handleColumnHeaderClick(e, key, resultSetIndex)}
+                            >
                               {key}
                             </th>
                           ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {resultSet.map((row: any, idx: number) => (
-                          <tr key={idx} className="border-b hover:bg-muted/30">
-                            {Object.values(row).map((value: any, colIdx: number) => (
-                              <td key={colIdx} className="p-2 font-mono text-xs whitespace-nowrap">
-                                {value === null || value === undefined ? (
-                                  <span className="text-muted-foreground italic">NULL</span>
-                                ) : (
-                                  <span className="truncate max-w-md block">{String(value)}</span>
+                        {resultSet.map((row: any, idx: number) => {
+                          const rowIsSelected = selections.get(resultSetIndex)?.selectionType === 'row' &&
+                            idx >= Math.min(selections.get(resultSetIndex)!.startRow, selections.get(resultSetIndex)!.endRow) &&
+                            idx <= Math.max(selections.get(resultSetIndex)!.startRow, selections.get(resultSetIndex)!.endRow);
+                          return (
+                            <tr key={idx} className={cn("border-b hover:bg-muted/30", rowIsSelected && "bg-primary/20")}>
+                              <td
+                                className={cn(
+                                  "border-r border-border/50 p-2 text-xs text-muted-foreground select-none cursor-pointer bg-muted/30 w-12 text-center",
+                                  rowIsSelected && "bg-primary/20"
                                 )}
+                                onMouseDown={(e) => handleRowHeaderClick(e, idx, resultSetIndex)}
+                                onMouseEnter={() => handleRowHeaderMouseEnter(idx, resultSetIndex)}
+                              >
+                                {idx + 1}
                               </td>
-                            ))}
-                          </tr>
-                        ))}
+                              {columnKeys.map((key) => {
+                                const isSelected = isCellSelected(idx, key, resultSetIndex);
+                                return (
+                                  <td 
+                                    key={key} 
+                                    className={cn(
+                                      "p-2 font-mono text-xs whitespace-nowrap cursor-cell",
+                                      isSelected && "bg-primary/20"
+                                    )}
+                                    onMouseDown={(e) => handleCellMouseDown(e, idx, key, resultSetIndex)}
+                                    onMouseEnter={() => handleCellMouseEnter(idx, key, resultSetIndex)}
+                                  >
+                                    {row[key] === null || row[key] === undefined ? (
+                                      <span className="text-muted-foreground italic">NULL</span>
+                                    ) : (
+                                      <span className="truncate max-w-md block">{String(row[key])}</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -661,48 +1182,152 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
             ) : (
               // Multiple result sets - show with headers
               <div className="space-y-4 p-2">
-                {queryResultSets.map((resultSet, resultSetIndex) => (
-                  <div key={resultSetIndex} className="border rounded-md overflow-hidden">
-                    <div className="border-b p-2 bg-muted/50 text-xs font-medium text-muted-foreground">
-                      Result Set {resultSetIndex + 1} ({resultSet.length} {resultSet.length === 1 ? 'row' : 'rows'})
-                    </div>
-                    {resultSet.length > 0 ? (
-                      <div className="overflow-auto max-h-96">
-                        <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
-                          <thead className="sticky top-0 bg-muted">
-                            <tr>
-                              {Object.keys(resultSet[0]).map((key) => (
-                                <th key={key} className="border-b p-2 text-left font-medium text-muted-foreground">
-                                  {key}
-                                </th>
-                              ))}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {resultSet.map((row: any, idx: number) => (
-                              <tr key={idx} className="border-b hover:bg-muted/30">
-                                {Object.values(row).map((value: any, colIdx: number) => (
-                                  <td key={colIdx} className="p-2 font-mono text-xs whitespace-nowrap">
-                                    {value === null || value === undefined ? (
-                                      <span className="text-muted-foreground italic">NULL</span>
-                                    ) : (
-                                      <span className="truncate max-w-md block">{String(value)}</span>
-                                    )}
-                                  </td>
+                {queryResultSets.map((resultSet, resultSetIndex) => {
+                  const columnKeys = resultSet.length > 0 
+                    ? getColumnKeys(resultSet) 
+                    : (lastColumnKeys.get(resultSetIndex) || []);
+                  return (
+                    <div key={resultSetIndex} className="border rounded-md overflow-hidden">
+                      <div className="border-b p-2 bg-muted/50 text-xs font-medium text-muted-foreground">
+                        Result Set {resultSetIndex + 1} ({resultSet.length} {resultSet.length === 1 ? 'row' : 'rows'})
+                      </div>
+                      {resultSet.length > 0 ? (
+                        <div 
+                          ref={(el) => {
+                            if (el) resultsTableRefs.current.set(resultSetIndex, el);
+                          }}
+                          className="overflow-auto max-h-96"
+                          tabIndex={0}
+                          onMouseLeave={() => setIsSelecting(prev => {
+                            const newMap = new Map(prev);
+                            newMap.set(resultSetIndex, false);
+                            return newMap;
+                          })}
+                        >
+                          <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
+                            <thead className="sticky top-0 bg-muted z-10">
+                              <tr>
+                                <th
+                                  className="border-b border-r border-border/50 p-2 text-xs text-muted-foreground select-none cursor-pointer bg-muted/30 w-12 text-center"
+                                  title="Select All"
+                                  onMouseDown={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    if (resultSet.length > 0 && columnKeys.length > 0) {
+                                      setIsSelecting(prev => new Map(prev).set(resultSetIndex, true));
+                                      setSelections(prev => {
+                                        const newSelections = new Map(prev);
+                                        newSelections.set(resultSetIndex, {
+                                          startRow: 0,
+                                          startCol: columnKeys[0],
+                                          endRow: resultSet.length - 1,
+                                          endCol: columnKeys[columnKeys.length - 1],
+                                          selectionType: 'cell',
+                                          resultSetIndex,
+                                        });
+                                        return newSelections;
+                                      });
+                                    }
+                                  }}
+                                />
+                                {columnKeys.map((key) => (
+                                  <th 
+                                    key={key} 
+                                    className="border-b p-2 text-left font-medium text-muted-foreground cursor-pointer"
+                                    onMouseDown={(e) => handleColumnHeaderClick(e, key, resultSetIndex)}
+                                  >
+                                    {key}
+                                  </th>
                                 ))}
                               </tr>
-                            ))}
-                          </tbody>
+                            </thead>
+                            <tbody>
+                              {resultSet.map((row: any, idx: number) => {
+                                const rowIsSelected = selections.get(resultSetIndex)?.selectionType === 'row' &&
+                                  idx >= Math.min(selections.get(resultSetIndex)!.startRow, selections.get(resultSetIndex)!.endRow) &&
+                                  idx <= Math.max(selections.get(resultSetIndex)!.startRow, selections.get(resultSetIndex)!.endRow);
+                                return (
+                                  <tr key={idx} className={cn("border-b hover:bg-muted/30", rowIsSelected && "bg-primary/20")}>
+                                    <td
+                                      className={cn(
+                                        "border-r border-border/50 p-2 text-xs text-muted-foreground select-none cursor-pointer bg-muted/30 w-12 text-center",
+                                        rowIsSelected && "bg-primary/20"
+                                      )}
+                                      onMouseDown={(e) => handleRowHeaderClick(e, idx, resultSetIndex)}
+                                      onMouseEnter={() => handleRowHeaderMouseEnter(idx, resultSetIndex)}
+                                    >
+                                      {idx + 1}
+                                    </td>
+                                    {columnKeys.map((key) => {
+                                      const isSelected = isCellSelected(idx, key, resultSetIndex);
+                                      return (
+                                        <td 
+                                          key={key} 
+                                          className={cn(
+                                            "p-2 font-mono text-xs whitespace-nowrap cursor-cell",
+                                            isSelected && "bg-primary/20"
+                                          )}
+                                          onMouseDown={(e) => handleCellMouseDown(e, idx, key, resultSetIndex)}
+                                          onMouseEnter={() => handleCellMouseEnter(idx, key, resultSetIndex)}
+                                        >
+                                          {row[key] === null || row[key] === undefined ? (
+                                            <span className="text-muted-foreground italic">NULL</span>
+                                          ) : (
+                                            <span className="truncate max-w-md block">{String(row[key])}</span>
+                                          )}
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
                         </table>
                       </div>
                     ) : (
-                      <div className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
-                        <CheckCircle2 className="h-4 w-4" />
-                        No rows returned
-                      </div>
+                      columnKeys.length > 0 ? (
+                        // Show headers even when no rows if we have column info
+                        <div 
+                          ref={(el) => {
+                            if (el) resultsTableRefs.current.set(resultSetIndex, el);
+                          }}
+                          className="overflow-auto max-h-96"
+                          tabIndex={0}
+                        >
+                          <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
+                            <thead className="sticky top-0 bg-muted z-10">
+                              <tr>
+                                <th className="border-b border-r border-border/50 p-2 text-xs text-muted-foreground select-none bg-muted/30 w-12 text-center" />
+                                {columnKeys.map((key) => (
+                                  <th 
+                                    key={key} 
+                                    className="border-b p-2 text-left font-medium text-muted-foreground"
+                                  >
+                                    {key}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr>
+                                <td colSpan={columnKeys.length + 1} className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
+                                  <CheckCircle2 className="h-4 w-4" />
+                                  No rows returned
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="p-4 text-sm text-muted-foreground text-center flex items-center justify-center gap-2">
+                          <CheckCircle2 className="h-4 w-4" />
+                          No rows returned
+                        </div>
+                      )
                     )}
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             )
           ) : (

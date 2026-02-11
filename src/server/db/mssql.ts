@@ -185,7 +185,7 @@ export async function executeQuery(
 export async function executeQueryMultiple(
   query: string, 
   parameters?: Array<{ name: string; value: any; type?: any }>
-): Promise<any[][]> {
+): Promise<{ recordsets: any[][]; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
   if (!pool || !pool.connected) {
     throw new Error('Not connected to database');
   }
@@ -206,8 +206,95 @@ export async function executeQueryMultiple(
   
   try {
     const result = await request.query(query);
-    // Return all result sets (recordsets is an array of arrays)
-    return result.recordsets || [];
+    const recordsets = result.recordsets || [];
+    
+    // Extract column metadata for empty result sets
+    // SQL Server provides column metadata even when result sets are empty
+    // The mssql library exposes this through the result object
+    const columnMetadata: Array<{ resultSetIndex: number; columns: string[] }> = [];
+    
+    if (recordsets.length > 0) {
+      // Use for...of loop to allow await inside
+      for (let index = 0; index < recordsets.length; index++) {
+        const recordset = recordsets[index];
+        if (recordset.length === 0) {
+          // Try to get column names from the result object
+          // In mssql, column metadata is available even for empty recordsets
+          let columns: string[] = [];
+          
+          // Access the corresponding recordset object
+          const resultSet = index === 0 ? result.recordset : (result.recordsets?.[index] || null);
+          
+          // Try to extract column names from the recordset structure
+          // The mssql library stores column metadata in the recordset object
+          if (resultSet) {
+            // Check if the recordset has a columns property
+            // This should exist even for empty recordsets
+            try {
+              // Access columns through the recordset's internal structure
+              // In mssql v6+, columns might be in resultSet.columns
+              const recordsetObj = resultSet as any;
+              
+              // Try different ways to access column metadata
+              if (recordsetObj.columns && typeof recordsetObj.columns === 'object') {
+                columns = Object.keys(recordsetObj.columns);
+              } else if (recordsetObj.recordset && recordsetObj.recordset.columns) {
+                columns = Object.keys(recordsetObj.recordset.columns);
+              }
+              
+              // If still no columns, try accessing through the result object's metadata
+              if (columns.length === 0 && result.recordset) {
+                // For the first result set, check result.recordset directly
+                if (index === 0 && (result.recordset as any).columns) {
+                  columns = Object.keys((result.recordset as any).columns);
+                }
+              }
+            } catch (e) {
+              // If accessing columns fails, we'll try the fallback method below
+            }
+          }
+          
+          // Fallback: If we couldn't get columns from the result object,
+          // execute a modified query with TOP 0 to get column metadata
+          if (columns.length === 0) {
+            try {
+              const trimmedQuery = query.trim().toUpperCase();
+              if (trimmedQuery.startsWith('SELECT')) {
+                // Execute query with TOP 0 to get column structure
+                const metadataRequest = pool.request();
+                metadataRequest.timeout = 5000;
+                
+                // Modify query to add TOP 0 if not present, or replace existing TOP
+                let metadataQuery = query;
+                if (!trimmedQuery.match(/\bTOP\s+\d+/i)) {
+                  metadataQuery = query.replace(/^(\s*SELECT\s+)(.*)$/i, '$1TOP 0 $2');
+                } else {
+                  metadataQuery = query.replace(/\bTOP\s+\d+/i, 'TOP 0');
+                }
+                
+                const metadataResult = await metadataRequest.query(metadataQuery);
+                if (metadataResult.recordset) {
+                  // Try to get column names from the metadata query result
+                  const metadataRecordset = metadataResult.recordset as any;
+                  if (metadataRecordset.columns) {
+                    columns = Object.keys(metadataRecordset.columns);
+                  }
+                }
+              }
+            } catch (metadataError) {
+              // If metadata query fails, continue without column info
+              // This is acceptable - UI will show "No rows returned" without headers
+            }
+          }
+          
+          if (columns.length > 0) {
+            columnMetadata.push({ resultSetIndex: index, columns });
+          }
+        }
+      }
+    }
+    
+    return { recordsets, columnMetadata: columnMetadata.length > 0 ? columnMetadata : undefined };
   } catch (error: any) {
     // Enhance timeout error messages
     if (error.code === 'ETIMEOUT' || error.code === 'ESOCKET' || error.message?.includes('timeout') || error.message?.includes('ETIMEDOUT')) {

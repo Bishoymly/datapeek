@@ -156,7 +156,7 @@ export const api = {
     return res.json();
   },
 
-  async executeQuery(query: string): Promise<{ data: any[]; resultSets?: any[][]; executionTime?: number }> {
+  async executeQuery(query: string): Promise<{ data: any[]; resultSets?: any[][]; executionTime?: number; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
     const res = await fetch(`${API_BASE}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
