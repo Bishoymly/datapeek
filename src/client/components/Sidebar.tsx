@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Table } from '@/lib/api';
 import { formatName } from '@/lib/nameFormatter';
-import { Database, Table as TableIcon, ChevronRight, ChevronDown, Search, Star, ChevronUp, X, ChevronLeft, FileText, Plus } from 'lucide-react';
+import { Database, Table as TableIcon, ChevronRight, ChevronDown, Search, Star, ChevronUp, X, ChevronLeft, FileText, Plus, Trash2 } from 'lucide-react';
 import { Input } from './ui/input';
 import { cn } from '@/lib/utils';
 
@@ -14,6 +14,8 @@ interface SidebarProps {
   queriesUpdated?: number; // Timestamp to trigger refresh
   favoritesUpdated?: number; // Timestamp to trigger refresh
   nameDisplayMode?: 'database-names' | 'friendly-names';
+  connected?: boolean;
+  onConnectionLost?: () => void;
 }
 
 interface FavoriteTable {
@@ -125,7 +127,17 @@ function createNewQuery(): SavedQuery {
   return newQuery;
 }
 
-export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQuery, queriesUpdated, favoritesUpdated, nameDisplayMode = 'database-names' }: SidebarProps) {
+export function Sidebar({
+  onTableSelect,
+  selectedTable,
+  onQuerySelect,
+  selectedQuery,
+  queriesUpdated,
+  favoritesUpdated,
+  nameDisplayMode = 'database-names',
+  connected = false,
+  onConnectionLost,
+}: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(['Favorites', 'Queries']));
   const [favorites, setFavorites] = useState<FavoriteTable[]>(getFavorites());
@@ -135,7 +147,25 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
     queryKey: ['tables'],
     queryFn: () => api.getTables(),
     refetchInterval: 30000, // Refresh every 30 seconds
+    enabled: connected,
   });
+  const hasNotifiedConnectionLostRef = useRef(false);
+
+  useEffect(() => {
+    if (!connected) {
+      hasNotifiedConnectionLostRef.current = false;
+      return;
+    }
+    const errorMessage = error instanceof Error ? error.message : '';
+    if (
+      onConnectionLost &&
+      !hasNotifiedConnectionLostRef.current &&
+      errorMessage.toLowerCase().includes('not connected to database')
+    ) {
+      hasNotifiedConnectionLostRef.current = true;
+      onConnectionLost();
+    }
+  }, [connected, error, onConnectionLost]);
 
   // Group tables by schema (memoized to prevent infinite loops)
   const groupedTables = useMemo(() => {
@@ -331,20 +361,31 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
                         selectedTable?.table === fav.tableInfo.tableName;
 
                       return (
-                        <button
+                        <div
                           key={`fav-${fav.schema}.${fav.tableInfo.tableName}`}
-                          onClick={() => onTableSelect(fav.schema, fav.tableInfo.tableName)}
                           className={cn(
-                            'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                            'group flex w-full items-center gap-1 rounded-md px-1 py-0.5 text-left text-sm transition-colors',
                             isSelected
                               ? 'bg-primary text-primary-foreground'
                               : 'hover:bg-accent'
                           )}
                         >
-                          <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                          <span className="flex-1 truncate">{formatName(fav.tableInfo.tableName, nameDisplayMode)}</span>
-                          <span className="text-xs opacity-60 truncate">{formatName(fav.schema, nameDisplayMode)}</span>
-                        </button>
+                          <button
+                            onClick={() => onTableSelect(fav.schema, fav.tableInfo.tableName)}
+                            className="flex flex-1 items-center gap-2 rounded-md px-1 py-1 text-left"
+                          >
+                            <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                            <span className="flex-1 truncate">{formatName(fav.tableInfo.tableName, nameDisplayMode)}</span>
+                            <span className="text-xs opacity-60 truncate">{formatName(fav.schema, nameDisplayMode)}</span>
+                          </button>
+                          <button
+                            onClick={(e) => toggleFavorite(fav.schema, fav.tableInfo.tableName, e)}
+                            className="p-1 rounded hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity"
+                            title="Remove from favorites"
+                          >
+                            <Star className="h-3.5 w-3.5 fill-yellow-500 text-yellow-500" />
+                          </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -388,23 +429,42 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
                   {queries.map((query) => {
                     const isSelected = selectedQuery === query.id;
                     return (
-                      <button
+                      <div
                         key={query.id}
-                        onClick={() => {
-                          if (onQuerySelect) {
-                            onQuerySelect(query.id);
-                          }
-                        }}
                         className={cn(
-                          'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                          'group flex w-full items-center gap-1 rounded-md px-1 py-0.5 text-left text-sm transition-colors',
                           isSelected
                             ? 'bg-primary text-primary-foreground'
                             : 'hover:bg-accent'
                         )}
                       >
-                        <FileText className="h-3.5 w-3.5 flex-shrink-0" />
-                        <span className="flex-1 truncate">{getDisplayName(query.name)}</span>
-                      </button>
+                        <button
+                          onClick={() => {
+                            if (onQuerySelect) {
+                              onQuerySelect(query.id);
+                            }
+                          }}
+                          className="flex flex-1 items-center gap-2 rounded-md px-1 py-1 text-left"
+                        >
+                          <FileText className="h-3.5 w-3.5 flex-shrink-0" />
+                          <span className="flex-1 truncate">{getDisplayName(query.name)}</span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (deleteQuery(query.id)) {
+                              setQueries(getQueries());
+                              if (isSelected && onQuerySelect) {
+                                onQuerySelect(undefined);
+                              }
+                            }
+                          }}
+                          className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive opacity-0 group-hover:opacity-100 transition-opacity"
+                          title="Delete query"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     );
                   })}
                   {queries.length === 0 && (
@@ -446,21 +506,33 @@ export function Sidebar({ onTableSelect, selectedTable, onQuerySelect, selectedQ
                         const isSelected =
                           selectedTable?.schema === schema &&
                           selectedTable?.table === table.tableName;
+                        const isTableFav = isFavorite(schema, table.tableName, favorites);
 
                         return (
-                          <button
+                          <div
                             key={`${schema}.${table.tableName}`}
-                            onClick={() => onTableSelect(schema, table.tableName)}
                             className={cn(
-                              'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors',
+                              'group flex w-full items-center gap-1 rounded-md px-1 py-0.5 text-left text-sm transition-colors',
                               isSelected
                                 ? 'bg-primary text-primary-foreground'
                                 : 'hover:bg-accent'
                             )}
                           >
-                            <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
-                            <span className="flex-1 truncate">{formatName(table.tableName, nameDisplayMode)}</span>
-                          </button>
+                            <button
+                              onClick={() => onTableSelect(schema, table.tableName)}
+                              className="flex flex-1 items-center gap-2 rounded-md px-1 py-1 text-left"
+                            >
+                              <TableIcon className="h-3.5 w-3.5 flex-shrink-0" />
+                              <span className="flex-1 truncate">{formatName(table.tableName, nameDisplayMode)}</span>
+                            </button>
+                            <button
+                              onClick={(e) => toggleFavorite(schema, table.tableName, e)}
+                              className="p-1 rounded hover:bg-accent/80 opacity-0 group-hover:opacity-100 transition-opacity"
+                              title={isTableFav ? 'Remove from favorites' : 'Add to favorites'}
+                            >
+                              <Star className={cn('h-3.5 w-3.5', isTableFav && 'fill-yellow-500 text-yellow-500')} />
+                            </button>
+                          </div>
                         );
                       })}
                     </div>

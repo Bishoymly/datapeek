@@ -42,6 +42,9 @@ export interface TableData {
   fkDisplayMode?: 'key-only' | 'key-display' | 'display-only';
 }
 
+// Filter type is exported from FilterDialog component
+export type { Filter } from '../components/FilterDialog';
+
 export const api = {
   async testConnection(config: ConnectionConfig): Promise<{ success: boolean; message: string }> {
     const res = await fetch(`${API_BASE}/connect/test`, {
@@ -118,7 +121,7 @@ export const api = {
     pageSize: number = 100,
     sortColumn?: string,
     sortDirection?: 'asc' | 'desc',
-    filters?: Record<string, string>,
+    filters?: Filter[],
     fkDisplayMode: 'key-only' | 'key-display' | 'display-only' = 'key-only'
   ): Promise<TableData> {
     const params = new URLSearchParams({
@@ -129,10 +132,10 @@ export const api = {
       params.append('sortColumn', sortColumn);
       params.append('sortDirection', sortDirection || 'asc');
     }
-    if (filters) {
-      Object.entries(filters).forEach(([column, value]) => {
-        if (value) {
-          params.append(`filter[${column}]`, value);
+    if (filters && filters.length > 0) {
+      filters.forEach((filter) => {
+        if (filter.value !== null && filter.value !== undefined) {
+          params.append(`filter[${filter.column}]`, JSON.stringify(filter));
         }
       });
     }
@@ -152,6 +155,33 @@ export const api = {
         (error as any).data = { timeout: true };
       }
       throw error;
+    }
+    return res.json();
+  },
+
+  async getDistinctValues(
+    schema: string,
+    table: string,
+    column: string,
+    searchQuery?: string,
+    displayColumn?: string
+  ): Promise<Array<Record<string, any>>> {
+    const params = new URLSearchParams({
+      column,
+    });
+    if (searchQuery) {
+      params.append('search', searchQuery);
+    }
+    // Send columns as comma-separated: keyColumn,displayColumn (or just keyColumn if no display)
+    const columns = displayColumn ? `${column},${displayColumn}` : column;
+    params.append('columns', columns);
+    
+    const res = await fetch(
+      `${API_BASE}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/distinct-values/${encodeURIComponent(column)}?${params.toString()}`
+    );
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({ error: 'Failed to fetch distinct values' }));
+      throw new Error(errorData.error || 'Failed to fetch distinct values');
     }
     return res.json();
   },

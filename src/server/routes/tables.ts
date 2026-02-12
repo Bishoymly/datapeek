@@ -120,31 +120,87 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     const fkDisplayMode = (req.query.fkDisplayMode as string) || 'key-only'; // Default to 'key-only', options: 'key-only', 'key-display', 'display-only'
     const offset = (page - 1) * pageSize;
     
-    // Parse filters from query params (format: filter[columnName]=value)
-    const filters: Record<string, string> = {};
+    // Parse filters from query params (format: filter[columnName]=JSON.stringify(filterObject))
+    // Support both new structured format and legacy string format for backward compatibility
+    interface ParsedFilter {
+      column: string;
+      operator: string;
+      value: any;
+      dataType?: string;
+    }
+    
+    const parsedFilters: ParsedFilter[] = [];
+    const seenFilterColumns = new Set<string>();
+    const parseFilterEntry = (columnName: string, rawValue: unknown) => {
+      if (!columnName || rawValue === null || rawValue === undefined || seenFilterColumns.has(columnName)) {
+        return;
+      }
+
+      const filterValue = String(rawValue).trim();
+      if (!filterValue) return;
+
+      try {
+        // Try to parse as JSON (new structured format)
+        const parsed = JSON.parse(filterValue);
+        if (parsed && typeof parsed === 'object' && (parsed as any).operator) {
+          parsedFilters.push({
+            column: columnName,
+            operator: (parsed as any).operator,
+            value: (parsed as any).value,
+            dataType: (parsed as any).dataType,
+          });
+        } else {
+          // Fallback to legacy string format (contains)
+          parsedFilters.push({
+            column: columnName,
+            operator: 'contains',
+            value: filterValue,
+          });
+        }
+      } catch {
+        // Not JSON, treat as legacy string format (contains)
+        parsedFilters.push({
+          column: columnName,
+          operator: 'contains',
+          value: filterValue,
+        });
+      }
+
+      seenFilterColumns.add(columnName);
+    };
+
+    // Support keys like filter[columnName]=...
     Object.keys(req.query).forEach((key) => {
       const match = key.match(/^filter\[(.+)\]$/);
-      if (match && req.query[key] && String(req.query[key]).trim()) {
-        filters[match[1]] = String(req.query[key]).trim();
+      if (match) {
+        const columnName = match[1];
+        parseFilterEntry(columnName, req.query[key]);
       }
     });
-    console.log('Received filters from query:', filters);
-    console.log('All query params:', req.query);
+
+    // Also support nested parsed format: filter[columnName]=... -> req.query.filter[columnName]
+    const nestedFilters = req.query.filter;
+    if (nestedFilters && typeof nestedFilters === 'object' && !Array.isArray(nestedFilters)) {
+      Object.entries(nestedFilters as Record<string, unknown>).forEach(([columnName, rawValue]) => {
+        parseFilterEntry(columnName, rawValue);
+      });
+    }
+    
+    console.log('Parsed filters:', parsedFilters);
     
     const pool = getConnection();
     if (!pool || !pool.connected) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
     
-    // Validate filter columns exist
-    const filterColumns: string[] = [];
-    if (Object.keys(filters).length > 0) {
+    // Get column metadata for filter validation and type detection
+    const columnMetadata: Record<string, { dataType: string; exists: boolean }> = {};
+    if (parsedFilters.length > 0) {
       try {
-        // Build IN clause with proper parameterization
-        const columnNames = Object.keys(filters);
+        const columnNames = [...new Set(parsedFilters.map(f => f.column))];
         const placeholders = columnNames.map((_, i) => `@col${i}`).join(', ');
         const validateQuery = `
-          SELECT COLUMN_NAME 
+          SELECT COLUMN_NAME, DATA_TYPE
           FROM INFORMATION_SCHEMA.COLUMNS 
           WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table AND COLUMN_NAME IN (${placeholders})
         `;
@@ -154,37 +210,191 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           ...columnNames.map((col, i) => ({ name: `col${i}`, value: col, type: sql.NVarChar }))
         ];
         const validateResult = await executeQuery(validateQuery, validateParams);
-        filterColumns.push(...validateResult.map((r: any) => r.COLUMN_NAME));
-        console.log('Validated filter columns:', filterColumns, 'from filters:', filters);
+        validateResult.forEach((r: any) => {
+          columnMetadata[r.COLUMN_NAME] = {
+            dataType: r.DATA_TYPE,
+            exists: true,
+          };
+        });
+        console.log('Column metadata:', columnMetadata);
       } catch (e) {
-        // If validation fails, log and ignore filters
         console.error('Error validating filter columns:', e);
-        console.error('Filters that failed validation:', filters);
       }
     }
     
-    // Build WHERE clause for filters
+    // Helper function to map SQL Server data types to mssql parameter types
+    const getSqlType = (dataType: string): any => {
+      const dt = dataType.toLowerCase();
+      if (dt === 'int' || dt === 'integer') return sql.Int;
+      if (dt === 'bigint') return sql.BigInt;
+      if (dt === 'smallint') return sql.SmallInt;
+      if (dt === 'tinyint') return sql.TinyInt;
+      if (dt === 'bit') return sql.Bit;
+      if (dt === 'float' || dt === 'real' || dt === 'double precision') return sql.Float;
+      if (dt === 'decimal' || dt === 'numeric' || dt === 'money' || dt === 'smallmoney') return sql.Decimal(18, 2);
+      if (dt === 'datetime' || dt === 'datetime2' || dt === 'smalldatetime') return sql.DateTime;
+      if (dt === 'date') return sql.Date;
+      if (dt === 'time') return sql.Time;
+      if (dt === 'uniqueidentifier') return sql.UniqueIdentifier;
+      return sql.NVarChar;
+    };
+    
+    // Build WHERE clause for filters with optimized conditions
     let whereClause = '';
     const filterParams: any[] = [];
-    if (filterColumns.length > 0) {
-      const validFilters = filterColumns.filter((col) => {
-        const filterValue = filters[col];
-        return filterValue && filterValue.trim() !== '';
+    let paramIndex = 0;
+    
+    if (parsedFilters.length > 0) {
+      const whereConditions: string[] = [];
+      
+      parsedFilters.forEach((filter) => {
+        const columnName = filter.column;
+        const metadata = columnMetadata[columnName];
+        
+        if (!metadata || !metadata.exists) {
+          console.warn(`Filter column ${columnName} not found, skipping`);
+          return;
+        }
+        
+        const dataType = filter.dataType || metadata.dataType;
+        const operator = filter.operator;
+        const value = filter.value;
+        
+        if (value === null || value === undefined || value === '') {
+          return;
+        }
+        
+        const sqlType = getSqlType(dataType);
+        const paramName = `filter${paramIndex}`;
+        
+        try {
+          let condition = '';
+          
+          switch (operator) {
+            // Text operators
+            case 'contains':
+              filterParams.push({ name: paramName, value: `%${String(value)}%`, type: sql.NVarChar });
+              condition = `[${columnName}] LIKE @${paramName}`;
+              break;
+            case 'equals':
+              // Use exact match for better performance
+              filterParams.push({ name: paramName, value: String(value), type: sqlType });
+              condition = `[${columnName}] = @${paramName}`;
+              break;
+            case 'startsWith':
+              // Index-friendly: LIKE 'value%'
+              filterParams.push({ name: paramName, value: `${String(value)}%`, type: sql.NVarChar });
+              condition = `[${columnName}] LIKE @${paramName}`;
+              break;
+            case 'endsWith':
+              filterParams.push({ name: paramName, value: `%${String(value)}`, type: sql.NVarChar });
+              condition = `[${columnName}] LIKE @${paramName}`;
+              break;
+            case 'notContains':
+              filterParams.push({ name: paramName, value: `%${String(value)}%`, type: sql.NVarChar });
+              condition = `[${columnName}] NOT LIKE @${paramName}`;
+              break;
+            
+            // Number operators
+            case 'eq':
+              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
+              condition = `[${columnName}] = @${paramName}`;
+              break;
+            case 'gt':
+              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
+              condition = `[${columnName}] > @${paramName}`;
+              break;
+            case 'gte':
+              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
+              condition = `[${columnName}] >= @${paramName}`;
+              break;
+            case 'lt':
+              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
+              condition = `[${columnName}] < @${paramName}`;
+              break;
+            case 'lte':
+              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
+              condition = `[${columnName}] <= @${paramName}`;
+              break;
+            case 'between':
+              if (typeof value === 'object' && 'from' in value && 'to' in value) {
+                const fromParam = `filter${paramIndex}`;
+                const toParam = `filter${paramIndex + 1}`;
+                filterParams.push({ name: fromParam, value: Number(value.from), type: sqlType });
+                filterParams.push({ name: toParam, value: Number(value.to), type: sqlType });
+                condition = `[${columnName}] BETWEEN @${fromParam} AND @${toParam}`;
+                paramIndex++; // Extra increment for second param
+              }
+              break;
+            
+            // Date operators
+            case 'dateEq':
+              filterParams.push({ name: paramName, value: String(value), type: sqlType });
+              condition = `CAST([${columnName}] AS DATE) = CAST(@${paramName} AS DATE)`;
+              break;
+            case 'dateAfter':
+              filterParams.push({ name: paramName, value: String(value), type: sqlType });
+              condition = `CAST([${columnName}] AS DATE) > CAST(@${paramName} AS DATE)`;
+              break;
+            case 'dateBefore':
+              filterParams.push({ name: paramName, value: String(value), type: sqlType });
+              condition = `CAST([${columnName}] AS DATE) < CAST(@${paramName} AS DATE)`;
+              break;
+            case 'dateBetween':
+              if (typeof value === 'object' && 'from' in value && 'to' in value) {
+                const fromParam = `filter${paramIndex}`;
+                const toParam = `filter${paramIndex + 1}`;
+                filterParams.push({ name: fromParam, value: String(value.from), type: sqlType });
+                filterParams.push({ name: toParam, value: String(value.to), type: sqlType });
+                condition = `CAST([${columnName}] AS DATE) BETWEEN CAST(@${fromParam} AS DATE) AND CAST(@${toParam} AS DATE)`;
+                paramIndex++; // Extra increment for second param
+              }
+              break;
+            
+            // Multiple select operators
+            case 'in':
+            case 'notIn':
+              if (Array.isArray(value) && value.length > 0) {
+                const placeholders = value.map((_, i) => `@${paramName}_${i}`).join(', ');
+                value.forEach((val, i) => {
+                  filterParams.push({ name: `${paramName}_${i}`, value: val, type: sqlType });
+                });
+                const inOperator = operator === 'in' ? 'IN' : 'NOT IN';
+                condition = `[${columnName}] ${inOperator} (${placeholders})`;
+                // Don't increment paramIndex here as we handle it per value
+                paramIndex += value.length - 1; // Adjust for multiple params
+              }
+              break;
+            
+            default:
+              console.warn(`Unknown filter operator: ${operator}, falling back to contains`);
+              filterParams.push({ name: paramName, value: `%${String(value)}%`, type: sql.NVarChar });
+              condition = `[${columnName}] LIKE @${paramName}`;
+          }
+          
+          if (condition) {
+            whereConditions.push(condition);
+            paramIndex++;
+          }
+        } catch (error) {
+          console.error(`Error building filter condition for ${columnName}:`, error);
+        }
       });
       
-      if (validFilters.length > 0) {
-        const whereConditions = validFilters.map((col, index) => {
-          const filterValue = filters[col];
-          filterParams.push({ name: `filter${index}`, value: `%${filterValue.trim()}%`, type: sql.NVarChar });
-          return `[${col}] LIKE @filter${index}`;
-        });
-        
+      if (whereConditions.length > 0) {
         whereClause = `WHERE ${whereConditions.join(' AND ')}`;
         console.log('Applying WHERE clause:', whereClause);
-        console.log('Filter params:', filterParams);
-        console.log('Valid filters:', validFilters);
+        console.log('Filter params:', filterParams.map(p => ({ name: p.name, value: p.value })));
       }
     }
+
+    // For joined data queries, qualify filtered columns to avoid ambiguity
+    // (e.g. same column names existing on referenced FK tables).
+    const qualifiedDataWhereClause = parsedFilters.reduce((clause, filter) => {
+      const escapedColumn = filter.column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`\\[${escapedColumn}\\]`, 'g');
+      return clause.replace(pattern, `[t].[${filter.column}]`);
+    }, whereClause);
     
     // Get total count with filters
     const countQuery = `SELECT COUNT(*) as total FROM [${schema}].[${table}]${whereClause ? ' ' + whereClause : ''}`;
@@ -251,9 +461,9 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     const fkSelects: string[] = [];
     const fkDisplayColumns: Record<string, string> = {};
     
-    // Only fetch display columns if mode is 'key-display' or 'display-only'
-    if (fkDisplayMode === 'key-display' || fkDisplayMode === 'display-only') {
-      const fkQuery = `
+    // Always resolve FK display columns so filter UIs can show friendly values.
+    // JOINs/selects are still only added when display mode requires them.
+    const fkQuery = `
         SELECT 
           kcu1.COLUMN_NAME as fkColumnName,
           kcu2.TABLE_SCHEMA as referencedSchema,
@@ -273,15 +483,15 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           AND kcu1.TABLE_NAME = @table
       `;
       
-      console.log('Fetching foreign keys with query:', fkQuery);
-      const foreignKeys = await executeQuery(fkQuery, [
-        { name: 'schema', value: schema, type: sql.NVarChar },
-        { name: 'table', value: table, type: sql.NVarChar }
-      ]);
-      console.log(`Found ${foreignKeys.length} foreign key(s)`);
-      
-      // Batch fetch all referenced table columns at once
-      if (foreignKeys.length > 0) {
+    console.log('Fetching foreign keys with query:', fkQuery);
+    const foreignKeys = await executeQuery(fkQuery, [
+      { name: 'schema', value: schema, type: sql.NVarChar },
+      { name: 'table', value: table, type: sql.NVarChar }
+    ]);
+    console.log(`Found ${foreignKeys.length} foreign key(s)`);
+    
+    // Batch fetch all referenced table columns at once
+    if (foreignKeys.length > 0) {
       // Get unique referenced tables
       const uniqueRefTables = Array.from(
         new Set(foreignKeys.map((fk: any) => `${fk.referencedSchema}.${fk.referencedTable}`))
@@ -357,19 +567,20 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         }
         
         if (displayColumn) {
-          const alias = `fk_${fkColumn}`;
-          fkJoins.push({
-            alias,
-            refSchema,
-            refTable,
-            fkColumn,
-            refColumn,
-            displayColumn
-          });
-          fkSelects.push(`${alias}.[${displayColumn}] as [${fkColumn}_display]`);
+          if (fkDisplayMode === 'key-display' || fkDisplayMode === 'display-only') {
+            const alias = `fk_${fkColumn}`;
+            fkJoins.push({
+              alias,
+              refSchema,
+              refTable,
+              fkColumn,
+              refColumn,
+              displayColumn
+            });
+            fkSelects.push(`${alias}.[${displayColumn}] as [${fkColumn}_display]`);
+          }
           fkDisplayColumns[fkColumn] = displayColumn;
         }
-      }
       }
     }
     
@@ -403,13 +614,13 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         SELECT ${allSelects}
         FROM [${schema}].[${table}] ${baseTableAlias}
         ${buildJoinClauses(baseTableAlias)}
-        ${whereClause}
+        ${qualifiedDataWhereClause}
         ORDER BY ${baseTableAlias}.[${orderByColumn}] ${orderByDirection}
         OFFSET @offset ROWS
         FETCH NEXT @pageSize ROWS ONLY
       `;
       
-      generatedQuery = `SELECT ${allSelects}\nFROM [${schema}].[${table}] ${baseTableAlias}${fkJoins.length > 0 ? '\n' + buildJoinClauses(baseTableAlias) : ''}${whereClause ? '\n' + whereClause : ''}\nORDER BY ${baseTableAlias}.[${orderByColumn}] ${orderByDirection}\nOFFSET ${offset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
+      generatedQuery = `SELECT ${allSelects}\nFROM [${schema}].[${table}] ${baseTableAlias}${fkJoins.length > 0 ? '\n' + buildJoinClauses(baseTableAlias) : ''}${qualifiedDataWhereClause ? '\n' + qualifiedDataWhereClause : ''}\nORDER BY ${baseTableAlias}.[${orderByColumn}] ${orderByDirection}\nOFFSET ${offset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
       
       console.log('Executing SQL query:', dataQuery);
       console.log('Query parameters:', {
@@ -478,6 +689,27 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           }
         });
         return filteredRow;
+      });
+    }
+
+    // Inline filter parameter values for display/export query text only.
+    // Execution remains parameterized via `executeQuery(...)` above.
+    if (generatedQuery && filterParams.length > 0) {
+      const formatSqlLiteral = (value: any): string => {
+        if (value === null || value === undefined) return 'NULL';
+        if (typeof value === 'number') return Number.isFinite(value) ? String(value) : 'NULL';
+        if (typeof value === 'boolean') return value ? '1' : '0';
+        if (value instanceof Date) return `'${value.toISOString().replace('T', ' ').slice(0, 19)}'`;
+        return `'${String(value).replace(/'/g, "''")}'`;
+      };
+
+      const paramValues = new Map<string, any>(
+        filterParams.map((p) => [p.name, p.value])
+      );
+
+      generatedQuery = generatedQuery.replace(/@([A-Za-z0-9_]+)/g, (full, name) => {
+        if (!paramValues.has(name)) return full;
+        return formatSqlLiteral(paramValues.get(name));
       });
     }
     
@@ -649,5 +881,219 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
       await disconnect();
     }
     res.status(500).json({ error: error.message || 'Failed to fetch related data' });
+  }
+});
+
+// Get distinct values for a column (for FK filtering)
+tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
+  try {
+    const { schema, table, column } = req.params;
+    const searchQuery = req.query.search as string;
+    const columnsParam = req.query.columns as string; // Comma-separated column names: "keyColumn" or "keyColumn,displayColumn"
+    
+    const pool = getConnection();
+    if (!pool || !pool.connected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    // Get column info and check if it's a foreign key
+    const columnQuery = `
+      SELECT 
+        c.COLUMN_NAME,
+        c.DATA_TYPE,
+        fk.REFERENCED_TABLE_SCHEMA as referencedSchema,
+        fk.REFERENCED_TABLE_NAME as referencedTable,
+        fk.REFERENCED_COLUMN_NAME as referencedColumn
+      FROM INFORMATION_SCHEMA.COLUMNS c
+      LEFT JOIN (
+        SELECT 
+          kcu1.TABLE_SCHEMA,
+          kcu1.TABLE_NAME,
+          kcu1.COLUMN_NAME,
+          kcu2.TABLE_SCHEMA as REFERENCED_TABLE_SCHEMA,
+          kcu2.TABLE_NAME as REFERENCED_TABLE_NAME,
+          kcu2.COLUMN_NAME as REFERENCED_COLUMN_NAME
+        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1
+          ON rc.CONSTRAINT_CATALOG = kcu1.CONSTRAINT_CATALOG
+          AND rc.CONSTRAINT_SCHEMA = kcu1.CONSTRAINT_SCHEMA
+          AND rc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME
+        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
+          ON rc.UNIQUE_CONSTRAINT_CATALOG = kcu2.CONSTRAINT_CATALOG
+          AND rc.UNIQUE_CONSTRAINT_SCHEMA = kcu2.CONSTRAINT_SCHEMA
+          AND rc.UNIQUE_CONSTRAINT_NAME = kcu2.CONSTRAINT_NAME
+          AND kcu1.ORDINAL_POSITION = kcu2.ORDINAL_POSITION
+      ) fk ON c.TABLE_SCHEMA = fk.TABLE_SCHEMA
+        AND c.TABLE_NAME = fk.TABLE_NAME
+        AND c.COLUMN_NAME = fk.COLUMN_NAME
+      WHERE c.TABLE_SCHEMA = @schema AND c.TABLE_NAME = @table AND c.COLUMN_NAME = @column
+    `;
+    const columnResult = await executeQuery(columnQuery, [
+      { name: 'schema', value: schema, type: sql.NVarChar },
+      { name: 'table', value: table, type: sql.NVarChar },
+      { name: 'column', value: column, type: sql.NVarChar }
+    ]);
+    
+    if (columnResult.length === 0) {
+      return res.status(400).json({ error: 'Column not found' });
+    }
+    
+    const columnInfo = columnResult[0];
+    const isForeignKey = !!columnInfo.referencedSchema && !!columnInfo.referencedTable;
+    
+    let query = '';
+    const params: any[] = [];
+    let displayColumn: string | null = null;
+    
+    if (isForeignKey) {
+      // For FK columns, fetch from referenced table with display column
+      const refSchema = columnInfo.referencedSchema;
+      const refTable = columnInfo.referencedTable;
+      const refColumn = columnInfo.referencedColumn;
+      
+      // Parse comma-separated columns from frontend: "keyColumn" or "keyColumn,displayColumn"
+      let columnsToSelect: string[] = [];
+      if (columnsParam) {
+        columnsToSelect = columnsParam.split(',').map(c => c.trim()).filter(c => c);
+      }
+      
+      // If columns provided, use them; otherwise auto-detect display column
+      if (columnsToSelect.length > 0) {
+        // Use the columns from the URL parameter
+        // First column is the key, second (if exists) is the display
+        const selectCols = columnsToSelect.map(col => `[${col}]`).join(', ');
+        query = `SELECT DISTINCT ${selectCols} FROM [${refSchema}].[${refTable}]`;
+        
+        // Add search filter if provided
+        if (searchQuery && searchQuery.trim()) {
+          const searchCols = columnsToSelect.map(col => `[${col}] LIKE @search`).join(' OR ');
+          query += ` WHERE (${searchCols}) AND [${refColumn}] IS NOT NULL`;
+          params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
+        } else {
+          query += ` WHERE [${refColumn}] IS NOT NULL`;
+        }
+        
+        // Order by first column (key) or second column (display) if available
+        const orderByCol = columnsToSelect.length > 1 ? columnsToSelect[1] : columnsToSelect[0];
+        query += ` ORDER BY [${orderByCol}] OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+      } else {
+        // Fallback: auto-detect display column if columns not provided
+        const refColumnsQuery = `
+          SELECT COLUMN_NAME, DATA_TYPE
+          FROM INFORMATION_SCHEMA.COLUMNS
+          WHERE TABLE_SCHEMA = @refSchema AND TABLE_NAME = @refTable
+          ORDER BY ORDINAL_POSITION
+        `;
+        const refColumns = await executeQuery(refColumnsQuery, [
+          { name: 'refSchema', value: refSchema, type: sql.NVarChar },
+          { name: 'refTable', value: refTable, type: sql.NVarChar }
+        ]);
+        
+        // Find display column: prefer name, title, description, code, or first string column
+        const preferredNames = ['name', 'title', 'description', 'code'];
+        for (const preferredName of preferredNames) {
+          const found = refColumns.find((col: any) => 
+            col.COLUMN_NAME.toLowerCase() === preferredName.toLowerCase() &&
+            col.COLUMN_NAME.toLowerCase() !== refColumn.toLowerCase()
+          );
+          if (found) {
+            displayColumn = found.COLUMN_NAME;
+            break;
+          }
+        }
+        
+        if (!displayColumn) {
+          const stringTypes = ['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'];
+          const found = refColumns.find((col: any) => 
+            col.COLUMN_NAME.toLowerCase() !== refColumn.toLowerCase() &&
+            stringTypes.some(type => col.DATA_TYPE.toLowerCase().includes(type))
+          );
+          if (found) {
+            displayColumn = found.COLUMN_NAME;
+          }
+        }
+        
+        // Build query with auto-detected display column
+        const selectCols = displayColumn 
+          ? `[${refColumn}], [${displayColumn}]`
+          : `[${refColumn}]`;
+        
+        query = `SELECT DISTINCT ${selectCols} FROM [${refSchema}].[${refTable}]`;
+        
+        // Add search filter if provided
+        if (searchQuery && searchQuery.trim()) {
+          if (displayColumn) {
+            query += ` WHERE [${displayColumn}] LIKE @search OR [${refColumn}] LIKE @search`;
+          } else {
+            query += ` WHERE [${refColumn}] LIKE @search`;
+          }
+          params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
+          query += ` AND [${refColumn}] IS NOT NULL`;
+        } else {
+          query += ` WHERE [${refColumn}] IS NOT NULL`;
+        }
+        
+        // Order by display column if available, otherwise by key
+        query += ` ORDER BY ${displayColumn ? `[${displayColumn}]` : `[${refColumn}]`} OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+      }
+    } else {
+      // For regular columns, fetch from current table.
+      // If "columns" is provided, honor it so FK filter option requests like
+      // "id,name" still return display values when querying the referenced table directly.
+      const dataType = columnInfo.DATA_TYPE.toLowerCase();
+      const columnsToSelect = columnsParam
+        ? columnsParam.split(',').map(c => c.trim()).filter(c => c)
+        : [];
+
+      if (columnsToSelect.length > 0) {
+        const escapedColumns = columnsToSelect.map(col => col.replace(/]/g, ']]'));
+        const keyColumn = escapedColumns[0];
+        const orderByColumn = escapedColumns.length > 1 ? escapedColumns[1] : keyColumn;
+        query = `SELECT DISTINCT ${escapedColumns.map(col => `[${col}]`).join(', ')} FROM [${schema}].[${table}]`;
+
+        if (searchQuery && searchQuery.trim()) {
+          const searchCols = escapedColumns.map(col => `TRY_CAST([${col}] AS NVARCHAR(4000)) LIKE @search`).join(' OR ');
+          query += ` WHERE (${searchCols}) AND [${keyColumn}] IS NOT NULL`;
+          params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
+        } else {
+          query += ` WHERE [${keyColumn}] IS NOT NULL`;
+        }
+
+        query += ` ORDER BY [${orderByColumn}] OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+      } else {
+        // Return actual column name, not aliased
+        query = `SELECT DISTINCT [${column}] FROM [${schema}].[${table}]`;
+        
+        // Add search filter if provided
+        if (searchQuery && searchQuery.trim()) {
+          if (['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'].some(t => dataType.includes(t))) {
+            query += ` WHERE [${column}] LIKE @search`;
+            params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
+            query += ` AND [${column}] IS NOT NULL`;
+          } else {
+            query += ` WHERE [${column}] IS NOT NULL`;
+          }
+        } else {
+          query += ` WHERE [${column}] IS NOT NULL`;
+        }
+        
+        query += ` ORDER BY [${column}] OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+      }
+    }
+    
+    const result = await executeQuery(query, params);
+    
+    // Return raw results with actual column names
+    // For FK: returns [{ [refColumn]: value, [displayColumn]: value }, ...]
+    // For regular columns: returns [{ [column]: value }, ...]
+    res.json(result);
+  } catch (error: any) {
+    console.error('Error fetching distinct values:', error);
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+      const { disconnect } = await import('../db/mssql.js');
+      await disconnect();
+    }
+    res.status(500).json({ error: error.message || 'Failed to fetch distinct values' });
   }
 });

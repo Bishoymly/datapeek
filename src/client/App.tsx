@@ -315,11 +315,8 @@ function AppContent() {
           setDatabaseName('');
         }
       } else {
-        // Connection status changed to false - disconnect
-        setConnected(false);
-        setDatabaseName('');
-        setSelectedTable(undefined);
-        setSelectedQuery(undefined);
+        // Keep current UI (including sidebar errors) and prompt reconnect.
+        setShowConnectionDialog(true);
       }
     }
   }, [connectionStatus]);
@@ -563,7 +560,7 @@ function AppContent() {
       ) : connected ? (
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
-          <div className="w-64 flex-shrink-0">
+          <div className="w-72 flex-shrink-0">
             <Sidebar
               onTableSelect={(schema, table) => {
                 setSelectedTable({ schema, table });
@@ -587,6 +584,10 @@ function AppContent() {
               queriesUpdated={queriesUpdated}
               favoritesUpdated={favoritesUpdated}
               nameDisplayMode={nameDisplayMode}
+              connected={connected}
+              onConnectionLost={() => {
+                setShowConnectionDialog(true);
+              }}
             />
           </div>
 
@@ -746,7 +747,7 @@ function AppContent() {
 
       {/* Connection Dialog */}
       <ConnectionDialog
-        open={showConnectionDialog && !connected && !isAutoConnecting}
+        open={showConnectionDialog && !isAutoConnecting}
         onConnect={handleConnect}
         onError={handleConnectionError}
       />

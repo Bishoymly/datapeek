@@ -16,7 +16,7 @@ import { api, type TableData, type Column } from '@/lib/api';
 import { formatName } from '@/lib/nameFormatter';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2, MoreVertical } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -26,6 +26,8 @@ import {
   DropdownMenuCheckboxItem,
   DropdownMenuSeparator,
 } from './ui/dropdown-menu';
+import { FilterDialog, type Filter as FilterType } from './FilterDialog';
+import { ColumnOptionsDialog } from './ColumnOptionsDialog';
 
 
 interface DataGridProps {
@@ -193,6 +195,50 @@ interface CellSelection {
   selectionType?: 'cell' | 'row' | 'column';
 }
 
+const FILTER_OPERATOR_LABELS: Record<string, string> = {
+  contains: 'contains',
+  equals: 'equals',
+  startsWith: 'starts with',
+  endsWith: 'ends with',
+  notContains: 'not contains',
+  eq: '=',
+  gt: '>',
+  gte: '>=',
+  lt: '<',
+  lte: '<=',
+  between: 'between',
+  dateEq: 'on',
+  dateBefore: 'before',
+  dateAfter: 'after',
+  dateBetween: 'between',
+  in: 'in',
+  notIn: 'not in',
+};
+
+function formatFilterValue(filter: FilterType): string {
+  if (Array.isArray(filter.value)) {
+    if (filter.value.length <= 3) {
+      return filter.value.map(String).join(', ');
+    }
+    return `${filter.value.slice(0, 3).map(String).join(', ')} +${filter.value.length - 3} more`;
+  }
+
+  if (
+    filter.value &&
+    typeof filter.value === 'object' &&
+    'from' in filter.value &&
+    'to' in filter.value
+  ) {
+    return `${String(filter.value.from)} to ${String(filter.value.to)}`;
+  }
+
+  if (typeof filter.value === 'number' && filter.dataType.toLowerCase() === 'bit') {
+    return filter.value === 1 ? 'True' : 'False';
+  }
+
+  return String(filter.value ?? '');
+}
+
 export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisplayMode = 'database-names' }: DataGridProps) {
   // Helper functions for FK display mode persistence
   const getFkDisplayMode = useCallback((): 'key-only' | 'key-display' | 'display-only' => {
@@ -223,9 +269,10 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
-  const [filterInputValues, setFilterInputValues] = useState<Record<string, string>>({});
+  const [structuredFilters, setStructuredFilters] = useState<FilterType[]>([]);
+  const [showColumnOptions, setShowColumnOptions] = useState<string | null>(null);
+  const [columnOptionsPosition, setColumnOptionsPosition] = useState<{ top: number; left: number } | null>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
-  const [showFilterInput, setShowFilterInput] = useState<string | null>(null);
   const [fkDisplayMode, setFkDisplayMode] = useState<'key-only' | 'key-display' | 'display-only'>(() => {
     try {
       const key = `datapeek_fk_display_mode_${schema}_${table}`;
@@ -238,7 +285,6 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
     }
     return 'key-only';
   });
-  const filterDebounceRefs = useRef<Record<string, NodeJS.Timeout>>({});
   const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
   const dragStartPos = useRef<number | null>(null);
@@ -248,13 +294,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
   const [isSelecting, setIsSelecting] = useState(false);
   const tableRef = useRef<HTMLDivElement>(null);
   
-  // Column header hover menu state
-  const [hoveredColumn, setHoveredColumn] = useState<string | null>(null);
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const [menuHeight, setMenuHeight] = useState<number>(36); // Default menu height
+  // Column header refs for positioning
   const headerRefs = useRef<Record<string, HTMLTableCellElement>>({});
-  const menuTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
 
   // Clean up any remaining old storage keys (one-time cleanup)
   useEffect(() => {
@@ -282,34 +323,20 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
     // Don't reset columnOrder here - it will be loaded by the load effect below
     // Don't reset columnVisibility here - it will be loaded by the load effect below
     setSelection(null);
-    setHoveredColumn(null);
-    setMenuPosition(null);
+    setShowColumnOptions(null);
+    setColumnOptionsPosition(null);
     setColumnFilters([]);
-    setFilterInputValues({});
-    setShowFilterInput(null);
+    setStructuredFilters([]);
+    setShowColumnOptions(null);
+    setColumnOptionsPosition(null);
     // Load FK display mode for the new table
     setFkDisplayMode(getFkDisplayMode());
-    // Clear all filter debounce timers
-    Object.values(filterDebounceRefs.current).forEach(clearTimeout);
-    filterDebounceRefs.current = {};
-    if (menuTimeoutRef.current) {
-      clearTimeout(menuTimeoutRef.current);
-      menuTimeoutRef.current = null;
-    }
   }, [schema, table]);
 
-  // Sync filterInputValues with columnFilters when filters are cleared externally
+  // Sync structuredFilters with columnFilters (for backward compatibility with react-table)
   useEffect(() => {
-    const activeFilterIds = new Set(columnFilters.map((f) => f.id));
-    setFilterInputValues((prev) => {
-      const next = { ...prev };
-      Object.keys(next).forEach((columnId) => {
-        if (!activeFilterIds.has(columnId)) {
-          delete next[columnId];
-        }
-      });
-      return next;
-    });
+    // This effect maintains sync between structuredFilters and columnFilters
+    // columnFilters is used by react-table for UI state, structuredFilters is used for API calls
   }, [columnFilters]);
 
   // Load and apply column sorting when table changes
@@ -338,64 +365,17 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
     }
   }, [sorting, schema, table]);
 
-  // Cleanup timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (menuTimeoutRef.current) {
-        clearTimeout(menuTimeoutRef.current);
-      }
-    };
-  }, []);
 
   // Get sort column and direction from sorting state
   const sortColumn = sorting.length > 0 ? sorting[0].id : undefined;
   const sortDirection = sorting.length > 0 ? (sorting[0].desc ? 'desc' : 'asc') : undefined;
 
-  // Convert columnFilters to API format
-  const filters = useMemo(() => {
-    const filterObj: Record<string, string> = {};
-    columnFilters.forEach((filter) => {
-      if (filter.value && typeof filter.value === 'string' && filter.value.trim()) {
-        filterObj[filter.id] = filter.value.trim();
-      }
-    });
-    console.log('Column filters:', columnFilters);
-    console.log('Converted filters for API:', filterObj);
-    return filterObj;
-  }, [columnFilters]);
-
-  // Debounce filter input values to columnFilters (500ms delay)
-  useEffect(() => {
-    // Clear all existing timeouts
-    Object.values(filterDebounceRefs.current).forEach(clearTimeout);
-    filterDebounceRefs.current = {};
-
-    // Set up debounced updates for each filter input
-    Object.entries(filterInputValues).forEach(([columnId, value]) => {
-      filterDebounceRefs.current[columnId] = setTimeout(() => {
-        setColumnFilters((prev) => {
-          const filtered = prev.filter((f) => f.id !== columnId);
-          if (value.trim()) {
-            return [...filtered, { id: columnId, value: value.trim() }];
-          }
-          return filtered;
-        });
-      }, 500);
-    });
-
-    return () => {
-      // Cleanup: clear all timeouts on unmount or when filterInputValues changes
-      Object.values(filterDebounceRefs.current).forEach(clearTimeout);
-      filterDebounceRefs.current = {};
-    };
-  }, [filterInputValues]);
-
   // Reset to page 1 when filters change
   useEffect(() => {
-    if (Object.keys(filters).length > 0 && page !== 1) {
+    if (structuredFilters.length > 0 && page !== 1) {
       setPage(1);
     }
-  }, [JSON.stringify(filters)]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(structuredFilters)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch table structure to get foreign key information
   const { data: tableStructure } = useQuery<Column[]>({
@@ -406,8 +386,8 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
 
   // Fetch table data first (needed for foreign key values extraction)
   const { data, isLoading, error, isFetching } = useQuery<TableData>({
-    queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, filters, fkDisplayMode],
-    queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, filters, fkDisplayMode),
+    queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, structuredFilters, fkDisplayMode],
+    queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, structuredFilters.length > 0 ? structuredFilters : undefined, fkDisplayMode),
     enabled: !!schema && !!table,
     keepPreviousData: true, // Keep previous data while fetching new data
   });
@@ -509,30 +489,61 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
       : allKeys;
 
     return orderedKeys.map((key) => {
-      const columnFilter = columnFilters.find((f) => f.id === key);
-      const isFiltered = !!columnFilter?.value;
+      const columnFilter = structuredFilters.find((f) => f.column === key);
+      const isFiltered = !!columnFilter && columnFilter.value !== null;
       
       return {
         id: key,
         accessorKey: key,
         header: ({ column }) => {
+          const columnId = column.id || String(column.accessorKey);
           const isSorted = column.getIsSorted();
           const sortDirection = isSorted === 'asc' ? 'asc' : isSorted === 'desc' ? 'desc' : null;
+          const isOptionsOpen = showColumnOptions === columnId;
+          
           return (
-            <div className="flex items-center gap-1.5">
-              <span>{formatName(key, nameDisplayMode)}</span>
-              {isFiltered && (
-                <Filter className="h-3 w-3 text-primary shrink-0" />
-              )}
-              {sortDirection && (
-                <span className="inline-flex items-center shrink-0">
-                  {sortDirection === 'asc' ? (
-                    <ArrowUp className="h-3.5 w-3.5 text-primary" />
-                  ) : (
-                    <ArrowDown className="h-3.5 w-3.5 text-primary" />
-                  )}
-                </span>
-              )}
+            <div className="flex items-center justify-between gap-1.5 w-full">
+              <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                <span className="truncate">{formatName(key, nameDisplayMode)}</span>
+                {isFiltered && (
+                  <Filter className="h-3 w-3 text-primary shrink-0" />
+                )}
+                {sortDirection && (
+                  <span className="inline-flex items-center shrink-0">
+                    {sortDirection === 'asc' ? (
+                      <ArrowUp className="h-3.5 w-3.5 text-primary" />
+                    ) : (
+                      <ArrowDown className="h-3.5 w-3.5 text-primary" />
+                    )}
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const headerElement = headerRefs.current[columnId];
+                  if (headerElement) {
+                    const rect = headerElement.getBoundingClientRect();
+                    if (isOptionsOpen) {
+                      setShowColumnOptions(null);
+                      setColumnOptionsPosition(null);
+                    } else {
+                      setShowColumnOptions(columnId);
+                      setColumnOptionsPosition({
+                        top: rect.top,
+                        left: rect.right, // Position to the right of header
+                      });
+                    }
+                  }
+                }}
+                className={cn(
+                  "p-0.5 hover:bg-accent rounded transition-colors shrink-0",
+                  isOptionsOpen && "bg-accent"
+                )}
+                title="Column options"
+              >
+                <MoreVertical className="h-3.5 w-3.5" />
+              </button>
             </div>
           );
         },
@@ -572,7 +583,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
       },
     };
     });
-  }, [data?.data, columnOrder, draggedColumn, dragOverColumn, columnFilters, fkDisplayMode]);
+  }, [data?.data, columnOrder, draggedColumn, dragOverColumn, structuredFilters, fkDisplayMode, showColumnOptions, nameDisplayMode]);
 
   const tableInstance = useReactTable({
     data: data?.data || [],
@@ -605,9 +616,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
         .map(col => col.id)
         .filter((id): id is string => !!id)
         .filter(id => !id.endsWith('_display'));
-      const columnList = visibleCols.length === columnIds.filter(id => !id.endsWith('_display')).length
-        ? '*'
-        : visibleCols.map(col => `[${col}]`).join(', ');
+      const columnList = visibleCols.map(col => `[${col}]`).join(', ');
       return `SELECT ${columnList}\nFROM [${schema}].[${table}]`;
     }
     
@@ -635,71 +644,53 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
       .map(col => col.id)
       .filter((id): id is string => !!id)
       .filter(id => !id.endsWith('_display')); // Exclude display columns from SELECT (they're added separately)
-    
-    const allColIds = columnIds.filter(id => !id.endsWith('_display'));
-    
-    // Always modify SELECT clause to ensure FK display columns are included correctly
-    // (even if all columns are visible, we need to handle FK display mode)
-    if (visibleCols.length < allColIds.length || fkDisplayMode === 'key-display' || fkDisplayMode === 'display-only') {
-      const baseTableAlias = 't';
-      
-      // Build column list for visible base columns (using database names)
-      const baseColumns = visibleCols
-        .filter(col => {
-          // In display-only mode, exclude FK key columns (they're replaced by display columns)
-          if (fkDisplayMode === 'display-only' && foreignKeyMap[col]) {
-            return false;
-          }
-          return true;
-        })
-        .map(col => `[${baseTableAlias}].[${col}]`);
-      
-      // Add display columns based on FK display mode
-      const displayColumns: string[] = [];
-      if (fkDisplayMode === 'key-display') {
-        // Add display columns for visible FK columns
-        visibleCols.forEach(col => {
-          if (foreignKeyMap[col] && data?.foreignKeyDisplays?.[col]) {
-            const alias = `fk_${col}`;
-            const displayCol = data.foreignKeyDisplays[col];
-            displayColumns.push(`${alias}.[${displayCol}] as [${col}_display]`);
-          }
-        });
-      } else if (fkDisplayMode === 'display-only') {
-        // Replace FK columns with display columns
-        visibleCols.forEach(col => {
-          if (foreignKeyMap[col] && data?.foreignKeyDisplays?.[col]) {
-            const alias = `fk_${col}`;
-            const displayCol = data.foreignKeyDisplays[col];
-            displayColumns.push(`${alias}.[${displayCol}] as [${col}]`);
-          }
-        });
+
+    // Always rebuild SELECT from current visible/order state to respect hidden columns and order.
+    const baseTableAlias = 't';
+    const allSelectedColumns: string[] = [];
+
+    visibleCols.forEach((col) => {
+      const isFk = !!foreignKeyMap[col];
+      const displayCol = data?.foreignKeyDisplays?.[col];
+
+      if (fkDisplayMode === 'display-only' && isFk && displayCol) {
+        // Replace FK key column with display column, keeping original column position.
+        const alias = `fk_${col}`;
+        allSelectedColumns.push(`${alias}.[${displayCol}] as [${col}]`);
+        return;
       }
-      
-      // Combine all columns
-      const allSelectedColumns = [...baseColumns, ...displayColumns];
-      const columnList = allSelectedColumns.length > 0 
-        ? allSelectedColumns.join(', ')
-        : `[${baseTableAlias}].*`;
-      
-      // Replace SELECT clause - find the first FROM and preserve everything after it (JOINs, WHERE, ORDER BY)
-      // The query structure is: SELECT ... FROM ... [JOINs] [WHERE] [ORDER BY] [OFFSET/FETCH]
-      // We need to preserve everything from FROM onwards
-      const fromIndex = query.toUpperCase().indexOf('\nFROM');
-      if (fromIndex > 0) {
-        const afterFrom = query.substring(fromIndex + 1); // +1 to include the newline
+
+      // Default column output (key-only and key-display base key column)
+      allSelectedColumns.push(`[${baseTableAlias}].[${col}]`);
+
+      // In key-display mode include paired display column right after its key.
+      if (fkDisplayMode === 'key-display' && isFk && displayCol) {
+        const alias = `fk_${col}`;
+        allSelectedColumns.push(`${alias}.[${displayCol}] as [${col}_display]`);
+      }
+    });
+
+    const columnList = allSelectedColumns.length > 0
+      ? allSelectedColumns.join(', ')
+      : `[${baseTableAlias}].*`;
+
+    // Replace SELECT clause - find the first FROM and preserve everything after it (JOINs, WHERE, ORDER BY)
+    // The query structure is: SELECT ... FROM ... [JOINs] [WHERE] [ORDER BY] [OFFSET/FETCH]
+    // We need to preserve everything from FROM onwards
+    const fromIndex = query.toUpperCase().indexOf('\nFROM');
+    if (fromIndex > 0) {
+      const afterFrom = query.substring(fromIndex + 1); // +1 to include the newline
+      query = `SELECT ${columnList}\n${afterFrom}`;
+    } else {
+      // Fallback: try without newline (FROM might be on same line as SELECT)
+      const fromIndex2 = query.toUpperCase().indexOf('FROM');
+      if (fromIndex2 > 0) {
+        const afterFrom = query.substring(fromIndex2);
         query = `SELECT ${columnList}\n${afterFrom}`;
       } else {
-        // Fallback: try without newline (FROM might be on same line as SELECT)
-        const fromIndex2 = query.toUpperCase().indexOf('FROM');
-        if (fromIndex2 > 0) {
-          const afterFrom = query.substring(fromIndex2);
-          query = `SELECT ${columnList}\n${afterFrom}`;
-        } else {
-          // Last resort: use regex - but be careful to preserve JOINs
-          // Match SELECT ... FROM but stop before WHERE/ORDER BY to preserve them
-          query = query.replace(/SELECT\s+[^\n]+\s+FROM/i, `SELECT ${columnList}\nFROM`);
-        }
+        // Last resort: use regex - but be careful to preserve JOINs
+        // Match SELECT ... FROM but stop before WHERE/ORDER BY to preserve them
+        query = query.replace(/SELECT\s+[^\n]+\s+FROM/i, `SELECT ${columnList}\nFROM`);
       }
     }
     
@@ -955,6 +946,16 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
     column?.toggleVisibility(false);
   }, [tableInstance]);
 
+  const removeFilter = useCallback((columnId: string) => {
+    setStructuredFilters((prev) => prev.filter((f) => f.column !== columnId));
+    setColumnFilters((prev) => prev.filter((f) => f.id !== columnId));
+  }, []);
+
+  const clearAllFilters = useCallback(() => {
+    setStructuredFilters([]);
+    setColumnFilters([]);
+  }, []);
+
   // Handle cell mouse enter (for drag selection)
   const handleCellMouseEnter = useCallback((rowIndex: number, columnId: string) => {
     if (isSelecting && selection) {
@@ -1127,13 +1128,13 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
     }
   }, [isSelecting]);
 
-  // Update menu position on scroll and close on scroll
+  // Close column options dialog on scroll
   useEffect(() => {
-    if (!hoveredColumn || !menuPosition) return;
+    if (!showColumnOptions) return;
 
     const handleScroll = () => {
-      setHoveredColumn(null);
-      setMenuPosition(null);
+      setShowColumnOptions(null);
+      setColumnOptionsPosition(null);
     };
 
     const scrollContainer = tableRef.current;
@@ -1141,7 +1142,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
       scrollContainer.addEventListener('scroll', handleScroll, true);
       return () => scrollContainer.removeEventListener('scroll', handleScroll, true);
     }
-  }, [hoveredColumn, menuPosition]);
+  }, [showColumnOptions]);
 
   // Handle Ctrl+A to select all and Ctrl+C to copy
   useEffect(() => {
@@ -1272,202 +1273,242 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
 
   return (
     <div className="flex flex-col h-full bg-grid-bg dark:bg-grid-bg">
-      <div className="border-b p-2 flex items-center justify-between bg-muted/30 relative">
-        <div className="text-sm text-muted-foreground flex items-center gap-2">
-          {data ? (
-            <>
-              Showing {((page - 1) * pageSize) + 1} - {Math.min(page * pageSize, data.pagination.total)} of{' '}
-              {data.pagination.total} rows
-            </>
-          ) : (
-            <span>Loading...</span>
-          )}
-          {isFetching && (
-            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
+      <div className="border-b p-2 bg-muted/30 relative">
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-sm text-muted-foreground flex items-center gap-2">
+            {data ? (
+              <>
+                Showing {((page - 1) * pageSize) + 1} - {Math.min(page * pageSize, data.pagination.total)} of{' '}
+                {data.pagination.total} rows
+              </>
+            ) : (
+              <span>Loading...</span>
+            )}
+            {isFetching && (
+              <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  title="Foreign key display mode"
+                >
+                  <Link2 className="h-3 w-3 mr-1.5" />
+                  FK: {fkDisplayMode === 'key-only' ? 'Key Only' : fkDisplayMode === 'key-display' ? 'Key - Display' : 'Display Only'}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => {
+                    setFkDisplayMode('key-only');
+                    saveFkDisplayMode('key-only');
+                  }}
+                  className={fkDisplayMode === 'key-only' ? 'bg-accent' : ''}
+                >
+                  Key Only
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setFkDisplayMode('key-display');
+                    saveFkDisplayMode('key-display');
+                  }}
+                  className={fkDisplayMode === 'key-display' ? 'bg-accent' : ''}
+                >
+                  Key - Display
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setFkDisplayMode('display-only');
+                    saveFkDisplayMode('display-only');
+                  }}
+                  className={fkDisplayMode === 'display-only' ? 'bg-accent' : ''}
+                >
+                  Display Only
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            {onCreateQuery && (
+              <Button 
+                variant="outline" 
+                size="sm" 
                 className="h-7 text-xs"
-                title="Foreign key display mode"
+                onClick={handleCreateQuery}
+                title="Create query from current view"
               >
-                <Link2 className="h-3 w-3 mr-1.5" />
-                FK: {fkDisplayMode === 'key-only' ? 'Key Only' : fkDisplayMode === 'key-display' ? 'Key - Display' : 'Display Only'}
+                <FileText className="h-3 w-3 mr-1.5" />
+                Create Query
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                onClick={() => {
-                  setFkDisplayMode('key-only');
-                  saveFkDisplayMode('key-only');
-                }}
-                className={fkDisplayMode === 'key-only' ? 'bg-accent' : ''}
-              >
-                Key Only
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  setFkDisplayMode('key-display');
-                  saveFkDisplayMode('key-display');
-                }}
-                className={fkDisplayMode === 'key-display' ? 'bg-accent' : ''}
-              >
-                Key - Display
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  setFkDisplayMode('display-only');
-                  saveFkDisplayMode('display-only');
-                }}
-                className={fkDisplayMode === 'display-only' ? 'bg-accent' : ''}
-              >
-                Display Only
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          {onCreateQuery && (
-            <Button 
-              variant="outline" 
-              size="sm" 
-              className="h-7 text-xs"
-              onClick={handleCreateQuery}
-              title="Create query from current view"
-            >
-              <FileText className="h-3 w-3 mr-1.5" />
-              Create Query
-            </Button>
-          )}
-          <DropdownMenu open={showColumnMenu} onOpenChange={setShowColumnMenu}>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 text-xs">
-                <Columns className="h-3 w-3 mr-1.5" />
-                Columns ({Object.values(columnVisibility).filter(v => v).length}/{columnIds.length})
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-64 max-h-96 overflow-y-auto">
-              <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
-                Toggle columns
-              </div>
-              <DropdownMenuSeparator />
-              {orderedColumnIds.map((columnId, index) => {
-                const column = tableInstance.getColumn(columnId);
-                if (!column) return null;
-                const isVisible = column.getIsVisible();
-                // Get position in the actual column order, not just the array index
-                const orderIndex = columnOrder.length > 0 ? columnOrder.indexOf(columnId) : index;
-                const isFirst = orderIndex === 0;
-                const isLast = orderIndex === (columnOrder.length > 0 ? columnOrder.length - 1 : columnIds.length - 1);
-                
-                return (
-                  <div
-                    key={columnId}
-                    className="group flex items-center gap-1 px-2 py-1 hover:bg-accent rounded-sm"
-                  >
-                    <DropdownMenuCheckboxItem
-                      checked={isVisible}
-                      onCheckedChange={(checked) => {
-                        column.toggleVisibility(!!checked);
-                      }}
-                      className="text-xs flex-1 p-0 h-auto hover:bg-transparent"
+            )}
+            <DropdownMenu open={showColumnMenu} onOpenChange={setShowColumnMenu}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="h-7 text-xs">
+                  <Columns className="h-3 w-3 mr-1.5" />
+                  Columns ({Object.values(columnVisibility).filter(v => v).length}/{columnIds.length})
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-64 max-h-96 overflow-y-auto">
+                <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                  Toggle columns
+                </div>
+                <DropdownMenuSeparator />
+                {orderedColumnIds.map((columnId, index) => {
+                  const column = tableInstance.getColumn(columnId);
+                  if (!column) return null;
+                  const isVisible = column.getIsVisible();
+                  // Get position in the actual column order, not just the array index
+                  const orderIndex = columnOrder.length > 0 ? columnOrder.indexOf(columnId) : index;
+                  const isFirst = orderIndex === 0;
+                  const isLast = orderIndex === (columnOrder.length > 0 ? columnOrder.length - 1 : columnIds.length - 1);
+                  
+                  return (
+                    <div
+                      key={columnId}
+                      className="group flex items-center gap-1 px-2 py-1 hover:bg-accent rounded-sm"
                     >
-                      {formatName(columnId, nameDisplayMode)}
-                    </DropdownMenuCheckboxItem>
-                    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          if (!isFirst && columnOrder.length > 0) {
-                            const newOrder = [...columnOrder];
-                            const currentIndex = newOrder.indexOf(columnId);
-                            if (currentIndex > 0) {
-                              newOrder.splice(currentIndex, 1);
-                              newOrder.splice(currentIndex - 1, 0, columnId);
-                              setColumnOrder(newOrder);
-                            }
-                          }
+                      <DropdownMenuCheckboxItem
+                        checked={isVisible}
+                        onCheckedChange={(checked) => {
+                          column.toggleVisibility(!!checked);
                         }}
-                        disabled={isFirst}
-                        className={cn(
-                          'p-0.5 rounded hover:bg-accent',
-                          isFirst && 'opacity-30 cursor-not-allowed'
-                        )}
-                        title="Move up"
+                        className="text-xs flex-1 p-0 h-auto hover:bg-transparent"
                       >
-                        <ChevronUp className="h-3 w-3" />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          e.preventDefault();
-                          if (!isLast && columnOrder.length > 0) {
-                            const newOrder = [...columnOrder];
-                            const currentIndex = newOrder.indexOf(columnId);
-                            if (currentIndex < newOrder.length - 1) {
-                              newOrder.splice(currentIndex, 1);
-                              newOrder.splice(currentIndex + 1, 0, columnId);
-                              setColumnOrder(newOrder);
+                        {formatName(columnId, nameDisplayMode)}
+                      </DropdownMenuCheckboxItem>
+                      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            if (!isFirst && columnOrder.length > 0) {
+                              const newOrder = [...columnOrder];
+                              const currentIndex = newOrder.indexOf(columnId);
+                              if (currentIndex > 0) {
+                                newOrder.splice(currentIndex, 1);
+                                newOrder.splice(currentIndex - 1, 0, columnId);
+                                setColumnOrder(newOrder);
+                              }
                             }
-                          }
-                        }}
-                        disabled={isLast}
-                        className={cn(
-                          'p-0.5 rounded hover:bg-accent',
-                          isLast && 'opacity-30 cursor-not-allowed'
-                        )}
-                        title="Move down"
-                      >
-                        <ChevronDown className="h-3 w-3" />
-                      </button>
+                          }}
+                          disabled={isFirst}
+                          className={cn(
+                            'p-0.5 rounded hover:bg-accent',
+                            isFirst && 'opacity-30 cursor-not-allowed'
+                          )}
+                          title="Move up"
+                        >
+                          <ChevronUp className="h-3 w-3" />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            if (!isLast && columnOrder.length > 0) {
+                              const newOrder = [...columnOrder];
+                              const currentIndex = newOrder.indexOf(columnId);
+                              if (currentIndex < newOrder.length - 1) {
+                                newOrder.splice(currentIndex, 1);
+                                newOrder.splice(currentIndex + 1, 0, columnId);
+                                setColumnOrder(newOrder);
+                              }
+                            }
+                          }}
+                          disabled={isLast}
+                          className={cn(
+                            'p-0.5 rounded hover:bg-accent',
+                            isLast && 'opacity-30 cursor-not-allowed'
+                          )}
+                          title="Move down"
+                        >
+                          <ChevronDown className="h-3 w-3" />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onClick={() => {
-                  columnIds.forEach((colId) => {
-                    const col = tableInstance.getColumn(colId);
-                    col?.toggleVisibility(true);
-                  });
-                }}
-                className="text-xs"
-              >
-                Show all
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  columnIds.forEach((colId) => {
-                    const col = tableInstance.getColumn(colId);
-                    col?.toggleVisibility(false);
-                  });
-                }}
-                className="text-xs"
-              >
-                Hide all
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <span className="text-xs text-muted-foreground">Rows per page:</span>
-          <select
-            value={pageSize}
-            onChange={(e) => {
-              setPageSize(Number(e.target.value));
-              setPage(1);
-            }}
-            className="h-7 rounded border border-input bg-background px-2 text-xs"
-          >
-            <option value={50}>50</option>
-            <option value={100}>100</option>
-            <option value={250}>250</option>
-            <option value={500}>500</option>
-            <option value={1000}>1000</option>
-          </select>
+                  );
+                })}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onClick={() => {
+                    columnIds.forEach((colId) => {
+                      const col = tableInstance.getColumn(colId);
+                      col?.toggleVisibility(true);
+                    });
+                  }}
+                  className="text-xs"
+                >
+                  Show all
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    columnIds.forEach((colId) => {
+                      const col = tableInstance.getColumn(colId);
+                      col?.toggleVisibility(false);
+                    });
+                  }}
+                  className="text-xs"
+                >
+                  Hide all
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <span className="text-xs text-muted-foreground">Rows per page:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(1);
+              }}
+              className="h-7 rounded border border-input bg-background px-2 text-xs"
+            >
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+              <option value={500}>500</option>
+              <option value={1000}>1000</option>
+            </select>
+          </div>
         </div>
+        {structuredFilters.length > 0 && (
+          <div className="mt-2 pt-2 border-t border-border/40 flex flex-wrap items-center gap-1.5">
+            <div className="text-xs text-muted-foreground inline-flex items-center gap-1 mr-1">
+              <Filter className="h-3 w-3" />
+              <span>Filters:</span>
+            </div>
+            {structuredFilters.map((filter) => {
+              const operatorLabel = FILTER_OPERATOR_LABELS[filter.operator] || filter.operator;
+              const valueLabel = formatFilterValue(filter);
+              return (
+                <div
+                  key={filter.column}
+                  className="inline-flex items-center gap-1 rounded-md border bg-background px-2 py-0.5 text-xs"
+                  title={`${formatName(filter.column, nameDisplayMode)} ${operatorLabel} ${valueLabel}`}
+                >
+                  <span className="font-medium">{formatName(filter.column, nameDisplayMode)}</span>
+                  <span className="text-muted-foreground">{operatorLabel}</span>
+                  <span className="max-w-[220px] truncate">{valueLabel}</span>
+                  <button
+                    className="rounded p-0.5 hover:bg-accent"
+                    onClick={() => removeFilter(filter.column)}
+                    title={`Remove filter on ${formatName(filter.column, nameDisplayMode)}`}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              );
+            })}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={clearAllFilters}
+            >
+              Clear all
+            </Button>
+          </div>
+        )}
       </div>
 
       <div 
@@ -1541,52 +1582,7 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
                         dragOverColumn === columnId && "border-l-2 border-primary"
                       )}
                       onMouseDown={(e) => handleColumnHeaderClick(e, columnId)}
-                      onMouseEnter={() => {
-                        // Clear any pending timeout
-                        if (menuTimeoutRef.current) {
-                          clearTimeout(menuTimeoutRef.current);
-                          menuTimeoutRef.current = null;
-                        }
-                        
-                        handleColumnHeaderMouseEnter(columnId);
-                        setHoveredColumn(columnId);
-                        // Calculate menu position
-                        const headerElement = headerRefs.current[columnId];
-                        if (headerElement) {
-                          const rect = headerElement.getBoundingClientRect();
-                          setMenuPosition({
-                            top: rect.top, // No gap - right at the top
-                            left: rect.left,
-                          });
-                        }
-                      }}
-                      onMouseLeave={(e) => {
-                        // Clear any pending timeout
-                        if (menuTimeoutRef.current) {
-                          clearTimeout(menuTimeoutRef.current);
-                        }
-                        
-                        // Check if we're moving to another header, the menu, or filter input
-                        const relatedTarget = e.relatedTarget as HTMLElement;
-                        const isMovingToMenu = relatedTarget?.closest('[data-column-menu]');
-                        const isMovingToFilter = relatedTarget?.closest('[data-column-filter]');
-                        const isMovingToHeader = relatedTarget?.closest('th');
-                        
-                        // Only close if not moving to menu, filter, or another header
-                        if (!isMovingToMenu && !isMovingToFilter && !isMovingToHeader) {
-                          menuTimeoutRef.current = setTimeout(() => {
-                            const menuElement = document.querySelector(`[data-column-menu]`);
-                            const filterElement = document.querySelector(`[data-column-filter]`);
-                            const hoveredHeader = document.querySelector('th:hover');
-                            if (!menuElement?.matches(':hover') && !filterElement?.matches(':hover') && !hoveredHeader) {
-                              setHoveredColumn(null);
-                              setMenuPosition(null);
-                              setShowFilterInput(null);
-                            }
-                            menuTimeoutRef.current = null;
-                          }, 200);
-                        }
-                      }}
+                      onMouseEnter={() => handleColumnHeaderMouseEnter(columnId)}
                     >
                       {header.isPlaceholder
                         ? null
@@ -1643,263 +1639,86 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
         </table>
       </div>
 
-      {/* Column menu - rendered outside table to avoid overflow clipping */}
-      {hoveredColumn && menuPosition && (() => {
-        const columnId = hoveredColumn;
+      {/* Column Options Dialog - rendered outside table to avoid overflow clipping */}
+      {showColumnOptions && columnOptionsPosition && tableStructure && (() => {
+        const columnId = showColumnOptions;
         const column = tableInstance.getColumn(columnId);
-        const isSorted = column?.getIsSorted();
+        const columnInfo = tableStructure.find(col => col.columnName === columnId);
+        
+        if (!columnInfo || !column) return null;
+        
+        const isSorted = column.getIsSorted();
         const sortDirection = isSorted === 'asc' ? 'asc' : isSorted === 'desc' ? 'desc' : null;
-        // Use columnOrder for position checks, not visibleColumnIds, since we're moving in the full order
         const orderIndex = columnOrder.length > 0 ? columnOrder.indexOf(columnId) : visibleColumnIds.indexOf(columnId);
         const isFirst = orderIndex === 0;
         const isLast = orderIndex === (columnOrder.length > 0 ? columnOrder.length - 1 : visibleColumnIds.length - 1);
+        const currentFilter = structuredFilters.find(f => f.column === columnId) || null;
+        // Get display column name from foreignKeyDisplays if available
+        const fkDisplayColumn = data?.foreignKeyDisplays?.[columnId];
         
         return (
-          <div
-            ref={(el) => {
-              menuRef.current = el;
-              if (el) {
-                setMenuHeight(el.offsetHeight);
+          <ColumnOptionsDialog
+            columnId={columnId}
+            column={column}
+            columnInfo={columnInfo}
+            schema={schema}
+            table={table}
+            isSorted={!!isSorted}
+            sortDirection={sortDirection}
+            isFirst={isFirst}
+            isLast={isLast}
+            currentFilter={currentFilter}
+            fkDisplayMode={fkDisplayMode}
+            nameDisplayMode={nameDisplayMode}
+            fkDisplayColumn={fkDisplayColumn}
+            onSortAscending={() => {
+              if (isSorted === 'asc') {
+                // If already ascending, clear the sort
+                column.clearSorting();
+              } else {
+                column.toggleSorting(false);
               }
             }}
-            data-column-menu={columnId}
-            className="fixed z-50 bg-popover border rounded-md shadow-lg flex items-center gap-0.5 p-0.5"
-            style={{
-              top: `${menuPosition.top}px`,
-              left: `${menuPosition.left}px`,
-              transform: 'translateY(-100%)',
-            }}
-            onMouseEnter={() => {
-              // Clear any pending timeout
-              if (menuTimeoutRef.current) {
-                clearTimeout(menuTimeoutRef.current);
-                menuTimeoutRef.current = null;
+            onSortDescending={() => {
+              if (isSorted === 'desc') {
+                // If already descending, clear the sort
+                column.clearSorting();
+              } else {
+                column.toggleSorting(true);
               }
-              setHoveredColumn(columnId);
             }}
-            onMouseLeave={(e) => {
-              // Check if we're moving to a header
-              const relatedTarget = e.relatedTarget as HTMLElement;
-              const isMovingToHeader = relatedTarget?.closest('th');
-              
-              if (!isMovingToHeader) {
-                // Clear any pending timeout
-                if (menuTimeoutRef.current) {
-                  clearTimeout(menuTimeoutRef.current);
+            onMoveLeft={() => {
+              moveColumnLeft(columnId);
+            }}
+            onMoveRight={() => {
+              moveColumnRight(columnId);
+            }}
+            onHide={() => {
+              hideColumn(columnId);
+            }}
+            onFilterApply={(filter) => {
+              setStructuredFilters((prev) => {
+                const filtered = prev.filter((f) => f.column !== columnId);
+                if (filter) {
+                  return [...filtered, filter];
                 }
-                
-                menuTimeoutRef.current = setTimeout(() => {
-                  const menuElement = document.querySelector(`[data-column-menu]`);
-                  const hoveredHeader = document.querySelector('th:hover');
-                  if (!menuElement?.matches(':hover') && !hoveredHeader) {
-                    setHoveredColumn(null);
-                    setMenuPosition(null);
-                  }
-                  menuTimeoutRef.current = null;
-                }, 200);
-              }
-            }}
-          >
-            {/* Sort Ascending */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                column?.toggleSorting(false);
-                setHoveredColumn(null);
-                setMenuPosition(null);
-              }}
-              className={cn(
-                "p-1.5 hover:bg-accent rounded transition-colors",
-                sortDirection === 'asc' && "bg-accent"
-              )}
-              title="Sort Ascending"
-            >
-              <ArrowUp className="h-3.5 w-3.5" />
-            </button>
-            
-            {/* Sort Descending */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                column?.toggleSorting(true);
-                setHoveredColumn(null);
-                setMenuPosition(null);
-              }}
-              className={cn(
-                "p-1.5 hover:bg-accent rounded transition-colors",
-                sortDirection === 'desc' && "bg-accent"
-              )}
-              title="Sort Descending"
-            >
-              <ArrowDown className="h-3.5 w-3.5" />
-            </button>
-            
-            <div className="w-px h-4 bg-border" />
-            
-            {/* Move Left */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                moveColumnLeft(columnId);
-                setHoveredColumn(null);
-                setMenuPosition(null);
-              }}
-              disabled={isFirst}
-              className={cn(
-                "p-1.5 hover:bg-accent rounded transition-colors",
-                isFirst && "opacity-50 cursor-not-allowed"
-              )}
-              title="Move Left"
-            >
-              <ChevronLeft className="h-3.5 w-3.5" />
-            </button>
-            
-            {/* Move Right */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                moveColumnRight(columnId);
-                setHoveredColumn(null);
-                setMenuPosition(null);
-              }}
-              disabled={isLast}
-              className={cn(
-                "p-1.5 hover:bg-accent rounded transition-colors",
-                isLast && "opacity-50 cursor-not-allowed"
-              )}
-              title="Move Right"
-            >
-              <ChevronRight className="h-3.5 w-3.5" />
-            </button>
-            
-            <div className="w-px h-4 bg-border" />
-            
-            {/* Filter */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowFilterInput(showFilterInput === columnId ? null : columnId);
-              }}
-              className={cn(
-                "p-1.5 hover:bg-accent rounded transition-colors",
-                column?.getFilterValue() && "bg-accent"
-              )}
-              title="Filter Column"
-            >
-              <Filter className="h-3.5 w-3.5" />
-            </button>
-            
-            <div className="w-px h-4 bg-border" />
-            
-            {/* Hide */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                hideColumn(columnId);
-                setHoveredColumn(null);
-                setMenuPosition(null);
-              }}
-              className="p-1.5 hover:bg-accent rounded transition-colors text-destructive"
-              title="Hide Column"
-            >
-              <EyeOff className="h-3.5 w-3.5" />
-            </button>
-          </div>
-        );
-      })()}
-      
-      {/* Filter Input - rendered outside menu to avoid overflow clipping */}
-      {showFilterInput && hoveredColumn && menuPosition && (() => {
-        const columnId = showFilterInput;
-        const column = tableInstance.getColumn(columnId);
-        const filterValue = filterInputValues[columnId] || '';
-        const hasActiveFilter = column?.getFilterValue() as string | undefined;
-        
-        return (
-          <div
-            className="fixed z-50 bg-popover border rounded-md shadow-lg p-2"
-            style={{
-              top: `${menuPosition.top - menuHeight}px`,
-              left: `${menuPosition.left}px`,
-              transform: 'translateY(-100%)',
-              minWidth: '200px',
-            }}
-            onMouseEnter={() => {
-              if (menuTimeoutRef.current) {
-                clearTimeout(menuTimeoutRef.current);
-                menuTimeoutRef.current = null;
-              }
-            }}
-            onMouseLeave={(e) => {
-              const relatedTarget = e.relatedTarget as HTMLElement;
-              const isMovingToMenu = relatedTarget?.closest('[data-column-menu]');
-              
-              if (!isMovingToMenu) {
-                if (menuTimeoutRef.current) {
-                  clearTimeout(menuTimeoutRef.current);
+                return filtered;
+              });
+              // Also update columnFilters for react-table UI state
+              setColumnFilters((prev) => {
+                const filtered = prev.filter((f) => f.id !== columnId);
+                if (filter && filter.value !== null) {
+                  return [...filtered, { id: columnId, value: String(filter.value) }];
                 }
-                
-                menuTimeoutRef.current = setTimeout(() => {
-                  const menuElement = document.querySelector(`[data-column-menu]`);
-                  const filterElement = document.querySelector('[data-column-filter]');
-                  const hoveredHeader = document.querySelector('th:hover');
-                  if (!menuElement?.matches(':hover') && !filterElement?.matches(':hover') && !hoveredHeader) {
-                    setShowFilterInput(null);
-                  }
-                  menuTimeoutRef.current = null;
-                }, 200);
-              }
+                return filtered;
+              });
             }}
-            data-column-filter={columnId}
-          >
-            <div className="flex items-center gap-2">
-              <Input
-                type="text"
-                placeholder={`Filter ${formatName(columnId, nameDisplayMode)}...`}
-                value={filterValue}
-                onChange={(e) => {
-                  const value = e.target.value;
-                  setFilterInputValues((prev) => ({
-                    ...prev,
-                    [columnId]: value,
-                  }));
-                }}
-                className="h-7 text-xs"
-                autoFocus
-                onClick={(e) => e.stopPropagation()}
-                onKeyDown={(e) => {
-                  e.stopPropagation();
-                  if (e.key === 'Escape') {
-                    setShowFilterInput(null);
-                  }
-                }}
-                disabled={isFetching}
-              />
-              {(filterValue || hasActiveFilter) && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // Clear the debounce timeout for this column
-                    if (filterDebounceRefs.current[columnId]) {
-                      clearTimeout(filterDebounceRefs.current[columnId]);
-                      delete filterDebounceRefs.current[columnId];
-                    }
-                    setFilterInputValues((prev) => {
-                      const next = { ...prev };
-                      delete next[columnId];
-                      return next;
-                    });
-                    setColumnFilters((prev) => prev.filter((f) => f.id !== columnId));
-                  }}
-                  className="p-1 hover:bg-accent rounded transition-colors"
-                  title="Clear Filter"
-                  disabled={isFetching}
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              )}
-            </div>
-          </div>
+            onClose={() => {
+              setShowColumnOptions(null);
+              setColumnOptionsPosition(null);
+            }}
+            position={columnOptionsPosition}
+          />
         );
       })()}
 
