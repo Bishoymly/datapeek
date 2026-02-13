@@ -49,6 +49,7 @@
     "express": "^4.21.2",
     "mssql": "^11.0.1",
     "open": "^10.1.0",
+    "pg": "^8.13.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -58,6 +59,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.10",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",

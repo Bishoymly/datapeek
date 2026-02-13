@@ -6,9 +6,11 @@ export interface ConnectionConfig {
   user?: string;
   password?: string;
   port?: number;
+  dbType?: 'mssql' | 'postgres';
   options?: {
     encrypt?: boolean;
     trustServerCertificate?: boolean;
+    ssl?: boolean | { rejectUnauthorized?: boolean };
   };
 }
 
@@ -186,17 +188,34 @@ export const api = {
     return res.json();
   },
 
-  async executeQuery(query: string): Promise<{ data: any[]; resultSets?: any[][]; executionTime?: number; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
+  async executeQuery(query: string, queryId?: string): Promise<{ data: any[]; resultSets?: any[][]; executionTime?: number; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }>; queryId?: string }> {
     const res = await fetch(`${API_BASE}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, queryId }),
     });
     if (!res.ok) {
       const error = await res.json();
+      if (error.cancelled) {
+        const cancelError: any = new Error('Query was cancelled');
+        cancelError.cancelled = true;
+        throw cancelError;
+      }
       throw new Error(error.error || 'Query failed');
     }
     return res.json();
+  },
+
+  async cancelQuery(queryId: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/query/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ queryId }),
+    });
+    if (!res.ok) {
+      const error = await res.json();
+      throw new Error(error.error || 'Failed to cancel query');
+    }
   },
 
   async getRelatedData(

@@ -14,6 +14,7 @@ import {
 } from '@tanstack/react-table';
 import { api, type TableData, type Column } from '@/lib/api';
 import { formatName } from '@/lib/nameFormatter';
+import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2, MoreVertical } from 'lucide-react';
@@ -33,6 +34,7 @@ import { ColumnOptionsDialog } from './ColumnOptionsDialog';
 interface DataGridProps {
   schema: string;
   table: string;
+  connectionInfo?: ConnectionInfo | null;
   onQueryChange?: (query: string) => void;
   onCreateQuery?: (query: string) => void;
   nameDisplayMode?: 'database-names' | 'friendly-names';
@@ -50,9 +52,11 @@ interface TableConfig {
   // Future configurations can be added here
 }
 
-function saveTableConfig(schema: string, table: string, config: TableConfig) {
+function saveTableConfig(schema: string, table: string, config: TableConfig, connectionId: string | null) {
+  if (!connectionId) return;
   try {
-    const key = `${TABLE_CONFIG_STORAGE_KEY}_${schema}_${table}`;
+    const baseKey = `${TABLE_CONFIG_STORAGE_KEY}_${schema}_${table}`;
+    const key = getConnectionKey(baseKey, connectionId);
     localStorage.setItem(key, JSON.stringify(config));
   } catch {
     // Ignore storage errors
@@ -60,15 +64,24 @@ function saveTableConfig(schema: string, table: string, config: TableConfig) {
 }
 
 // Migrate old storage keys to unified config format
-function migrateOldConfig(schema: string, table: string): TableConfig | null {
+function migrateOldConfig(schema: string, table: string, connectionId: string | null): TableConfig | null {
+  if (!connectionId) return null;
   try {
-    const oldOrderKey = `${OLD_COLUMN_ORDER_STORAGE_KEY}_${schema}_${table}`;
-    const oldVisibilityKey = `${OLD_COLUMN_VISIBILITY_STORAGE_KEY}_${schema}_${table}`;
-    const oldSortingKey = `${OLD_COLUMN_SORTING_STORAGE_KEY}_${schema}_${table}`;
+    const baseOldOrderKey = `${OLD_COLUMN_ORDER_STORAGE_KEY}_${schema}_${table}`;
+    const baseOldVisibilityKey = `${OLD_COLUMN_VISIBILITY_STORAGE_KEY}_${schema}_${table}`;
+    const baseOldSortingKey = `${OLD_COLUMN_SORTING_STORAGE_KEY}_${schema}_${table}`;
     
-    const oldOrder = localStorage.getItem(oldOrderKey);
-    const oldVisibility = localStorage.getItem(oldVisibilityKey);
-    const oldSorting = localStorage.getItem(oldSortingKey);
+    // Check both connection-specific and global old keys
+    const oldOrderKey = getConnectionKey(baseOldOrderKey, connectionId);
+    const oldVisibilityKey = getConnectionKey(baseOldVisibilityKey, connectionId);
+    const oldSortingKey = getConnectionKey(baseOldSortingKey, connectionId);
+    const globalOldOrderKey = baseOldOrderKey;
+    const globalOldVisibilityKey = baseOldVisibilityKey;
+    const globalOldSortingKey = baseOldSortingKey;
+    
+    const oldOrder = localStorage.getItem(oldOrderKey) || localStorage.getItem(globalOldOrderKey);
+    const oldVisibility = localStorage.getItem(oldVisibilityKey) || localStorage.getItem(globalOldVisibilityKey);
+    const oldSorting = localStorage.getItem(oldSortingKey) || localStorage.getItem(globalOldSortingKey);
     
     // If any old keys exist, migrate them
     if (oldOrder || oldVisibility || oldSorting) {
@@ -100,12 +113,15 @@ function migrateOldConfig(schema: string, table: string): TableConfig | null {
       
       // Save to new format
       if (Object.keys(config).length > 0) {
-        saveTableConfig(schema, table, config);
+        saveTableConfig(schema, table, config, connectionId);
         
-        // Clean up old keys
+        // Clean up old keys (both connection-specific and global)
         localStorage.removeItem(oldOrderKey);
         localStorage.removeItem(oldVisibilityKey);
         localStorage.removeItem(oldSortingKey);
+        localStorage.removeItem(globalOldOrderKey);
+        localStorage.removeItem(globalOldVisibilityKey);
+        localStorage.removeItem(globalOldSortingKey);
       }
       
       return config;
@@ -117,9 +133,11 @@ function migrateOldConfig(schema: string, table: string): TableConfig | null {
   return null;
 }
 
-function getTableConfig(schema: string, table: string): TableConfig {
+function getTableConfig(schema: string, table: string, connectionId: string | null): TableConfig {
+  if (!connectionId) return {};
   try {
-    const key = `${TABLE_CONFIG_STORAGE_KEY}_${schema}_${table}`;
+    const baseKey = `${TABLE_CONFIG_STORAGE_KEY}_${schema}_${table}`;
+    const key = getConnectionKey(baseKey, connectionId);
     const stored = localStorage.getItem(key);
     
     if (stored) {
@@ -127,7 +145,7 @@ function getTableConfig(schema: string, table: string): TableConfig {
     }
     
     // Try to migrate old config if new config doesn't exist
-    const migrated = migrateOldConfig(schema, table);
+    const migrated = migrateOldConfig(schema, table, connectionId);
     if (migrated) {
       return migrated;
     }
@@ -138,30 +156,30 @@ function getTableConfig(schema: string, table: string): TableConfig {
   }
 }
 
-function getColumnOrder(schema: string, table: string, defaultOrder: string[]): string[] {
-  const config = getTableConfig(schema, table);
+function getColumnOrder(schema: string, table: string, defaultOrder: string[], connectionId: string | null): string[] {
+  const config = getTableConfig(schema, table, connectionId);
   return config.columnOrder || defaultOrder;
 }
 
-function saveColumnOrder(schema: string, table: string, order: string[]) {
-  const config = getTableConfig(schema, table);
+function saveColumnOrder(schema: string, table: string, order: string[], connectionId: string | null) {
+  const config = getTableConfig(schema, table, connectionId);
   config.columnOrder = order;
-  saveTableConfig(schema, table, config);
+  saveTableConfig(schema, table, config, connectionId);
 }
 
-function getColumnSorting(schema: string, table: string): SortingState {
-  const config = getTableConfig(schema, table);
+function getColumnSorting(schema: string, table: string, connectionId: string | null): SortingState {
+  const config = getTableConfig(schema, table, connectionId);
   return config.sorting || [];
 }
 
-function saveColumnSorting(schema: string, table: string, sorting: SortingState) {
-  const config = getTableConfig(schema, table);
+function saveColumnSorting(schema: string, table: string, sorting: SortingState, connectionId: string | null) {
+  const config = getTableConfig(schema, table, connectionId);
   config.sorting = sorting;
-  saveTableConfig(schema, table, config);
+  saveTableConfig(schema, table, config, connectionId);
 }
 
-function getColumnVisibility(schema: string, table: string, allColumns: string[]): VisibilityState {
-  const config = getTableConfig(schema, table);
+function getColumnVisibility(schema: string, table: string, allColumns: string[], connectionId: string | null): VisibilityState {
+  const config = getTableConfig(schema, table, connectionId);
   const savedVisibility = config.columnVisibility;
   
   if (savedVisibility) {
@@ -181,10 +199,10 @@ function getColumnVisibility(schema: string, table: string, allColumns: string[]
   return visibility;
 }
 
-function saveColumnVisibility(schema: string, table: string, visibility: VisibilityState) {
-  const config = getTableConfig(schema, table);
+function saveColumnVisibility(schema: string, table: string, visibility: VisibilityState, connectionId: string | null) {
+  const config = getTableConfig(schema, table, connectionId);
   config.columnVisibility = visibility;
-  saveTableConfig(schema, table, config);
+  saveTableConfig(schema, table, config, connectionId);
 }
 
 interface CellSelection {
@@ -239,29 +257,41 @@ function formatFilterValue(filter: FilterType): string {
   return String(filter.value ?? '');
 }
 
-export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisplayMode = 'database-names' }: DataGridProps) {
+export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreateQuery, nameDisplayMode = 'database-names' }: DataGridProps) {
+  const connectionId = connectionInfo?.connectionId || null;
+  
   // Helper functions for FK display mode persistence
   const getFkDisplayMode = useCallback((): 'key-only' | 'key-display' | 'display-only' => {
+    if (!connectionId) return 'key-only';
     try {
-      const key = `datapeek_fk_display_mode_${schema}_${table}`;
+      const baseKey = `datapeek_fk_display_mode_${schema}_${table}`;
+      const key = getConnectionKey(baseKey, connectionId);
       const saved = localStorage.getItem(key);
       if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
         return saved;
+      }
+      // Check global key for backward compatibility
+      const globalKey = baseKey;
+      const globalSaved = localStorage.getItem(globalKey);
+      if (globalSaved === 'key-only' || globalSaved === 'key-display' || globalSaved === 'display-only') {
+        return globalSaved;
       }
     } catch {
       // Ignore storage errors
     }
     return 'key-only';
-  }, [schema, table]);
+  }, [schema, table, connectionId]);
 
   const saveFkDisplayMode = useCallback((mode: 'key-only' | 'key-display' | 'display-only') => {
+    if (!connectionId) return;
     try {
-      const key = `datapeek_fk_display_mode_${schema}_${table}`;
+      const baseKey = `datapeek_fk_display_mode_${schema}_${table}`;
+      const key = getConnectionKey(baseKey, connectionId);
       localStorage.setItem(key, mode);
     } catch {
       // Ignore storage errors
     }
-  }, [schema, table]);
+  }, [schema, table, connectionId]);
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
@@ -274,11 +304,19 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
   const [columnOptionsPosition, setColumnOptionsPosition] = useState<{ top: number; left: number } | null>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [fkDisplayMode, setFkDisplayMode] = useState<'key-only' | 'key-display' | 'display-only'>(() => {
+    if (!connectionId) return 'key-only';
     try {
-      const key = `datapeek_fk_display_mode_${schema}_${table}`;
+      const baseKey = `datapeek_fk_display_mode_${schema}_${table}`;
+      const key = getConnectionKey(baseKey, connectionId);
       const saved = localStorage.getItem(key);
       if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
         return saved;
+      }
+      // Check global key for backward compatibility
+      const globalKey = baseKey;
+      const globalSaved = localStorage.getItem(globalKey);
+      if (globalSaved === 'key-only' || globalSaved === 'key-display' || globalSaved === 'display-only') {
+        return globalSaved;
       }
     } catch {
       // Ignore storage errors
@@ -299,23 +337,33 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
 
   // Clean up any remaining old storage keys (one-time cleanup)
   useEffect(() => {
+    if (!connectionId) return;
     try {
-      // Clean up old keys for this specific table
-      const oldOrderKey = `${OLD_COLUMN_ORDER_STORAGE_KEY}_${schema}_${table}`;
-      const oldVisibilityKey = `${OLD_COLUMN_VISIBILITY_STORAGE_KEY}_${schema}_${table}`;
-      const oldSortingKey = `${OLD_COLUMN_SORTING_STORAGE_KEY}_${schema}_${table}`;
+      // Clean up old keys for this specific table (both connection-specific and global)
+      const baseOldOrderKey = `${OLD_COLUMN_ORDER_STORAGE_KEY}_${schema}_${table}`;
+      const baseOldVisibilityKey = `${OLD_COLUMN_VISIBILITY_STORAGE_KEY}_${schema}_${table}`;
+      const baseOldSortingKey = `${OLD_COLUMN_SORTING_STORAGE_KEY}_${schema}_${table}`;
+      
+      const oldOrderKey = getConnectionKey(baseOldOrderKey, connectionId);
+      const oldVisibilityKey = getConnectionKey(baseOldVisibilityKey, connectionId);
+      const oldSortingKey = getConnectionKey(baseOldSortingKey, connectionId);
       
       // Only remove if new config exists (migration already happened)
-      const newKey = `${TABLE_CONFIG_STORAGE_KEY}_${schema}_${table}`;
+      const baseNewKey = `${TABLE_CONFIG_STORAGE_KEY}_${schema}_${table}`;
+      const newKey = getConnectionKey(baseNewKey, connectionId);
       if (localStorage.getItem(newKey)) {
         localStorage.removeItem(oldOrderKey);
         localStorage.removeItem(oldVisibilityKey);
         localStorage.removeItem(oldSortingKey);
+        // Also clean up global old keys
+        localStorage.removeItem(baseOldOrderKey);
+        localStorage.removeItem(baseOldVisibilityKey);
+        localStorage.removeItem(baseOldSortingKey);
       }
     } catch {
       // Ignore cleanup errors
     }
-  }, [schema, table]);
+  }, [schema, table, connectionId]);
 
   // Reset page and clear selection when table changes
   useEffect(() => {
@@ -341,29 +389,29 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
 
   // Load and apply column sorting when table changes
   useEffect(() => {
-    const savedSorting = getColumnSorting(schema, table);
+    const savedSorting = getColumnSorting(schema, table, connectionId);
     if (savedSorting.length > 0) {
       setSorting(savedSorting);
     } else {
       setSorting([]);
     }
-  }, [schema, table]);
+  }, [schema, table, connectionId]);
 
   // Save column sorting when it changes (debounced to avoid excessive writes)
   useEffect(() => {
     if (sorting.length > 0) {
       const timeoutId = setTimeout(() => {
-        saveColumnSorting(schema, table, sorting);
+        saveColumnSorting(schema, table, sorting, connectionId);
       }, 100);
       return () => clearTimeout(timeoutId);
     } else {
       // Also save empty sorting to clear any previous sorting
       const timeoutId = setTimeout(() => {
-        saveColumnSorting(schema, table, []);
+        saveColumnSorting(schema, table, [], connectionId);
       }, 100);
       return () => clearTimeout(timeoutId);
     }
-  }, [sorting, schema, table]);
+  }, [sorting, schema, table, connectionId]);
 
 
   // Get sort column and direction from sorting state
@@ -425,25 +473,25 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
   // Load and apply column visibility when table changes
   useEffect(() => {
     if (defaultColumnOrder.length > 0) {
-      const visibility = getColumnVisibility(schema, table, defaultColumnOrder);
+      const visibility = getColumnVisibility(schema, table, defaultColumnOrder, connectionId);
       setColumnVisibility(visibility);
     }
-  }, [defaultColumnOrder.join(','), schema, table]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [defaultColumnOrder.join(','), schema, table, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save column visibility when it changes
   useEffect(() => {
     if (Object.keys(columnVisibility).length > 0 && defaultColumnOrder.length > 0) {
       const timeoutId = setTimeout(() => {
-        saveColumnVisibility(schema, table, columnVisibility);
+        saveColumnVisibility(schema, table, columnVisibility, connectionId);
       }, 100);
       return () => clearTimeout(timeoutId);
     }
-  }, [columnVisibility, schema, table]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [columnVisibility, schema, table, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load and apply column order when table changes
   useEffect(() => {
     if (defaultColumnOrder.length > 0) {
-      const savedOrder = getColumnOrder(schema, table, defaultColumnOrder);
+      const savedOrder = getColumnOrder(schema, table, defaultColumnOrder, connectionId);
       
       // If savedOrder is the same as defaultOrder, it means no custom order was saved
       // Otherwise, preserve the saved order and add any new columns at the end
@@ -467,17 +515,17 @@ export function DataGrid({ schema, table, onQueryChange, onCreateQuery, nameDisp
         }
       }
     }
-  }, [defaultColumnOrder.join(','), schema, table]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [defaultColumnOrder.join(','), schema, table, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save column order when it changes (debounced to avoid excessive writes)
   useEffect(() => {
     if (columnOrder.length > 0 && defaultColumnOrder.length > 0) {
       const timeoutId = setTimeout(() => {
-        saveColumnOrder(schema, table, columnOrder);
+        saveColumnOrder(schema, table, columnOrder, connectionId);
       }, 100);
       return () => clearTimeout(timeoutId);
     }
-  }, [columnOrder.join(','), schema, table]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [columnOrder.join(','), schema, table, connectionId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const columns = useMemo<ColumnDef<any>[]>(() => {
     if (!data?.data || data.data.length === 0) return [];

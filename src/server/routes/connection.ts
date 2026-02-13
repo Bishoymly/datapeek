@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { testConnection, connect, disconnect } from '../db/mssql.js';
+import { testConnection, connect, disconnect, setDbType, getConnection, executeQuery, getDialect } from '../db/index.js';
 import { getProvidedConnectionString } from '../index.js';
 
 export const connectionRoutes = Router();
@@ -14,10 +14,14 @@ connectionRoutes.post('/test', async (req, res) => {
         message: 'Connection test timeout' 
       });
     }
-  }, 10000); // 10 second timeout
+  }, 1800000); // 30 minute timeout
 
   try {
     const config = req.body;
+    // Set dbType if provided
+    if (config.dbType) {
+      setDbType(config.dbType);
+    }
     await testConnection(config);
     clearTimeout(timeout);
     if (!res.headersSent) {
@@ -50,10 +54,14 @@ connectionRoutes.post('/', async (req, res) => {
         message: 'Connection timeout' 
       });
     }
-  }, 15000); // 15 second timeout for connection
+  }, 1800000); // 30 minute timeout for connection
 
   try {
     const config = req.body;
+    // Set dbType if provided
+    if (config.dbType) {
+      setDbType(config.dbType);
+    }
     await connect(config);
     clearTimeout(timeout);
     if (!res.headersSent) {
@@ -86,23 +94,36 @@ connectionRoutes.delete('/', async (req, res) => {
 // Get connection status
 connectionRoutes.get('/status', async (req, res) => {
   try {
-    const { getConnection, executeQuery } = await import('../db/mssql.js');
     const pool = getConnection();
-    if (pool && pool.connected) {
-      // Actually test the connection by running a simple query
-      try {
-        const result = await executeQuery('SELECT DB_NAME() as databaseName');
-        const databaseName = result[0]?.databaseName || null;
-        res.json({ connected: true, databaseName });
-      } catch (error: any) {
-        // If query fails, connection is not actually working
-        // Check if it's an authentication error
-        const errorMessage = error.message || '';
-        if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
-          // Disconnect on authentication failure
-          const { disconnect } = await import('../db/mssql.js');
-          await disconnect();
+    if (pool) {
+      // Check if pool is connected (different for mssql vs postgres)
+      let isConnected = false;
+      if ('connected' in pool) {
+        // MSSQL ConnectionPool
+        isConnected = (pool as any).connected === true;
+      } else {
+        // PostgreSQL Pool - check if it's not ended
+        isConnected = !(pool as any).ended;
+      }
+
+      if (isConnected) {
+        // Actually test the connection by running a simple query
+        try {
+          const dialect = getDialect();
+          const result = await executeQuery(dialect.currentDbQuery());
+          const databaseName = result[0]?.databaseName || null;
+          res.json({ connected: true, databaseName });
+        } catch (error: any) {
+          // If query fails, connection is not actually working
+          // Check if it's an authentication error
+          const errorMessage = error.message || '';
+          if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
+            // Disconnect on authentication failure
+            await disconnect();
+          }
+          res.json({ connected: false });
         }
+      } else {
         res.json({ connected: false });
       }
     } else {

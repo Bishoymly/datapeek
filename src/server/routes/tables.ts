@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import sql from 'mssql';
-import { getConnection, executeQuery } from '../db/mssql.js';
+import { getConnection, executeQuery, getDialect, getDbType } from '../db/index.js';
 
 export const tableRoutes = Router();
 
@@ -8,17 +7,32 @@ export const tableRoutes = Router();
 tableRoutes.get('/', async (req, res) => {
   try {
     const pool = getConnection();
-    if (!pool || !pool.connected) {
+    if (!pool) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
     
+    // Check connection status (different for mssql vs postgres)
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
+    const dbType = getDbType();
+    
+    // INFORMATION_SCHEMA works for both, but PostgreSQL returns lowercase column names
+    // Also filter out system schemas for PostgreSQL
+    const schemaFilter = dbType === 'postgres' 
+      ? `AND table_schema NOT IN ('pg_catalog', 'information_schema')`
+      : '';
+    
     const query = `
       SELECT 
-        TABLE_SCHEMA as schemaName,
-        TABLE_NAME as tableName
-      FROM INFORMATION_SCHEMA.TABLES
-      WHERE TABLE_TYPE = 'BASE TABLE'
-      ORDER BY TABLE_SCHEMA, TABLE_NAME
+        table_schema as "schemaName",
+        table_name as "tableName"
+      FROM information_schema.tables
+      WHERE table_type = 'BASE TABLE'${schemaFilter}
+      ORDER BY table_schema, table_name
     `;
     
     const result = await executeQuery(query);
@@ -26,9 +40,9 @@ tableRoutes.get('/', async (req, res) => {
   } catch (error: any) {
     // Check if it's an authentication error
     const errorMessage = error.message || '';
-    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
       // Disconnect on authentication failure
-      const { disconnect } = await import('../db/mssql.js');
+      const { disconnect } = await import('../db/index.js');
       await disconnect();
     }
     res.status(500).json({ error: error.message || 'Failed to fetch tables' });
@@ -40,69 +54,78 @@ tableRoutes.get('/:schema/:table', async (req, res) => {
   try {
     const { schema, table } = req.params;
     const pool = getConnection();
-    if (!pool || !pool.connected) {
+    if (!pool) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
     
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
+    
+    // INFORMATION_SCHEMA works for both, but PostgreSQL returns lowercase column names
+    // Use explicit aliases with quotes for PostgreSQL compatibility
     const query = `
       SELECT 
-        c.COLUMN_NAME as columnName,
-        c.DATA_TYPE as dataType,
-        c.CHARACTER_MAXIMUM_LENGTH as maxLength,
-        c.IS_NULLABLE as isNullable,
-        c.COLUMN_DEFAULT as defaultValue,
-        CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END as isPrimaryKey,
-        fk.REFERENCED_TABLE_SCHEMA as referencedSchema,
-        fk.REFERENCED_TABLE_NAME as referencedTable,
-        fk.REFERENCED_COLUMN_NAME as referencedColumn
-      FROM INFORMATION_SCHEMA.COLUMNS c
+        c.column_name as "columnName",
+        c.data_type as "dataType",
+        c.character_maximum_length as "maxLength",
+        c.is_nullable as "isNullable",
+        c.column_default as "defaultValue",
+        CASE WHEN pk.column_name IS NOT NULL THEN 1 ELSE 0 END as "isPrimaryKey",
+        fk.referenced_table_schema as "referencedSchema",
+        fk.referenced_table_name as "referencedTable",
+        fk.referenced_column_name as "referencedColumn"
+      FROM information_schema.columns c
       LEFT JOIN (
-        SELECT ku.TABLE_SCHEMA, ku.TABLE_NAME, ku.COLUMN_NAME
-        FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
-          ON tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-          AND tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
-      ) pk ON c.TABLE_SCHEMA = pk.TABLE_SCHEMA
-        AND c.TABLE_NAME = pk.TABLE_NAME
-        AND c.COLUMN_NAME = pk.COLUMN_NAME
+        SELECT ku.table_schema, ku.table_name, ku.column_name
+        FROM information_schema.table_constraints tc
+        INNER JOIN information_schema.key_column_usage ku
+          ON tc.constraint_type = 'PRIMARY KEY'
+          AND tc.constraint_name = ku.constraint_name
+      ) pk ON c.table_schema = pk.table_schema
+        AND c.table_name = pk.table_name
+        AND c.column_name = pk.column_name
       LEFT JOIN (
         SELECT 
-          kcu1.TABLE_SCHEMA,
-          kcu1.TABLE_NAME,
-          kcu1.COLUMN_NAME,
-          kcu2.TABLE_SCHEMA as REFERENCED_TABLE_SCHEMA,
-          kcu2.TABLE_NAME as REFERENCED_TABLE_NAME,
-          kcu2.COLUMN_NAME as REFERENCED_COLUMN_NAME
-        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1
-          ON rc.CONSTRAINT_CATALOG = kcu1.CONSTRAINT_CATALOG
-          AND rc.CONSTRAINT_SCHEMA = kcu1.CONSTRAINT_SCHEMA
-          AND rc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
-          ON rc.UNIQUE_CONSTRAINT_CATALOG = kcu2.CONSTRAINT_CATALOG
-          AND rc.UNIQUE_CONSTRAINT_SCHEMA = kcu2.CONSTRAINT_SCHEMA
-          AND rc.UNIQUE_CONSTRAINT_NAME = kcu2.CONSTRAINT_NAME
-          AND kcu1.ORDINAL_POSITION = kcu2.ORDINAL_POSITION
-      ) fk ON c.TABLE_SCHEMA = fk.TABLE_SCHEMA
-        AND c.TABLE_NAME = fk.TABLE_NAME
-        AND c.COLUMN_NAME = fk.COLUMN_NAME
-      WHERE c.TABLE_SCHEMA = @schema
-        AND c.TABLE_NAME = @table
-      ORDER BY c.ORDINAL_POSITION
+          kcu1.table_schema,
+          kcu1.table_name,
+          kcu1.column_name,
+          kcu2.table_schema as referenced_table_schema,
+          kcu2.table_name as referenced_table_name,
+          kcu2.column_name as referenced_column_name
+        FROM information_schema.referential_constraints rc
+        INNER JOIN information_schema.key_column_usage kcu1
+          ON rc.constraint_catalog = kcu1.constraint_catalog
+          AND rc.constraint_schema = kcu1.constraint_schema
+          AND rc.constraint_name = kcu1.constraint_name
+        INNER JOIN information_schema.key_column_usage kcu2
+          ON rc.unique_constraint_catalog = kcu2.constraint_catalog
+          AND rc.unique_constraint_schema = kcu2.constraint_schema
+          AND rc.unique_constraint_name = kcu2.constraint_name
+          AND kcu1.ordinal_position = kcu2.ordinal_position
+      ) fk ON c.table_schema = fk.table_schema
+        AND c.table_name = fk.table_name
+        AND c.column_name = fk.column_name
+      WHERE c.table_schema = @schema
+        AND c.table_name = @table
+      ORDER BY c.ordinal_position
     `;
     
     const result = await executeQuery(query, [
-      { name: 'schema', value: schema, type: sql.NVarChar },
-      { name: 'table', value: table, type: sql.NVarChar }
+      { name: 'schema', value: schema },
+      { name: 'table', value: table }
     ]);
     
     res.json(result);
   } catch (error: any) {
     // Check if it's an authentication error
     const errorMessage = error.message || '';
-    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
       // Disconnect on authentication failure
-      const { disconnect } = await import('../db/mssql.js');
+      const { disconnect } = await import('../db/index.js');
       await disconnect();
     }
     res.status(500).json({ error: error.message || 'Failed to fetch table structure' });
@@ -189,30 +212,39 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     console.log('Parsed filters:', parsedFilters);
     
     const pool = getConnection();
-    if (!pool || !pool.connected) {
+    if (!pool) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
+    
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
     
     // Get column metadata for filter validation and type detection
     const columnMetadata: Record<string, { dataType: string; exists: boolean }> = {};
     if (parsedFilters.length > 0) {
       try {
         const columnNames = [...new Set(parsedFilters.map(f => f.column))];
-        const placeholders = columnNames.map((_, i) => `@col${i}`).join(', ');
+        const placeholders = columnNames.map((_, i) => dialect.param(i + 3)).join(', ');
         const validateQuery = `
-          SELECT COLUMN_NAME, DATA_TYPE
-          FROM INFORMATION_SCHEMA.COLUMNS 
-          WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table AND COLUMN_NAME IN (${placeholders})
+          SELECT column_name, data_type
+          FROM information_schema.columns 
+          WHERE table_schema = ${dialect.param(1)} AND table_name = ${dialect.param(2)} AND column_name IN (${placeholders})
         `;
         const validateParams = [
-          { name: 'schema', value: schema, type: sql.NVarChar },
-          { name: 'table', value: table, type: sql.NVarChar },
-          ...columnNames.map((col, i) => ({ name: `col${i}`, value: col, type: sql.NVarChar }))
+          { name: 'schema', value: schema },
+          { name: 'table', value: table },
+          ...columnNames.map((col) => ({ name: 'col', value: col }))
         ];
         const validateResult = await executeQuery(validateQuery, validateParams);
         validateResult.forEach((r: any) => {
-          columnMetadata[r.COLUMN_NAME] = {
-            dataType: r.DATA_TYPE,
+          const colName = r.column_name || r.COLUMN_NAME;
+          const dataType = r.data_type || r.DATA_TYPE;
+          columnMetadata[colName] = {
+            dataType,
             exists: true,
           };
         });
@@ -222,27 +254,10 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
       }
     }
     
-    // Helper function to map SQL Server data types to mssql parameter types
-    const getSqlType = (dataType: string): any => {
-      const dt = dataType.toLowerCase();
-      if (dt === 'int' || dt === 'integer') return sql.Int;
-      if (dt === 'bigint') return sql.BigInt;
-      if (dt === 'smallint') return sql.SmallInt;
-      if (dt === 'tinyint') return sql.TinyInt;
-      if (dt === 'bit') return sql.Bit;
-      if (dt === 'float' || dt === 'real' || dt === 'double precision') return sql.Float;
-      if (dt === 'decimal' || dt === 'numeric' || dt === 'money' || dt === 'smallmoney') return sql.Decimal(18, 2);
-      if (dt === 'datetime' || dt === 'datetime2' || dt === 'smalldatetime') return sql.DateTime;
-      if (dt === 'date') return sql.Date;
-      if (dt === 'time') return sql.Time;
-      if (dt === 'uniqueidentifier') return sql.UniqueIdentifier;
-      return sql.NVarChar;
-    };
-    
     // Build WHERE clause for filters with optimized conditions
     let whereClause = '';
     const filterParams: any[] = [];
-    let paramIndex = 0;
+    let paramIndex = 1; // Start from 1 for parameter indices
     
     if (parsedFilters.length > 0) {
       const whereConditions: string[] = [];
@@ -264,8 +279,7 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           return;
         }
         
-        const sqlType = getSqlType(dataType);
-        const paramName = `filter${paramIndex}`;
+        const quotedColumn = dialect.quoteId(columnName);
         
         try {
           let condition = '';
@@ -273,80 +287,80 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           switch (operator) {
             // Text operators
             case 'contains':
-              filterParams.push({ name: paramName, value: `%${String(value)}%`, type: sql.NVarChar });
-              condition = `[${columnName}] LIKE @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}%` });
+              condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
               break;
             case 'equals':
               // Use exact match for better performance
-              filterParams.push({ name: paramName, value: String(value), type: sqlType });
-              condition = `[${columnName}] = @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              condition = `${quotedColumn} = ${dialect.param(paramIndex)}`;
               break;
             case 'startsWith':
               // Index-friendly: LIKE 'value%'
-              filterParams.push({ name: paramName, value: `${String(value)}%`, type: sql.NVarChar });
-              condition = `[${columnName}] LIKE @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: `${String(value)}%` });
+              condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
               break;
             case 'endsWith':
-              filterParams.push({ name: paramName, value: `%${String(value)}`, type: sql.NVarChar });
-              condition = `[${columnName}] LIKE @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}` });
+              condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
               break;
             case 'notContains':
-              filterParams.push({ name: paramName, value: `%${String(value)}%`, type: sql.NVarChar });
-              condition = `[${columnName}] NOT LIKE @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}%` });
+              condition = `${quotedColumn} NOT LIKE ${dialect.param(paramIndex)}`;
               break;
             
             // Number operators
             case 'eq':
-              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
-              condition = `[${columnName}] = @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              condition = `${quotedColumn} = ${dialect.param(paramIndex)}`;
               break;
             case 'gt':
-              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
-              condition = `[${columnName}] > @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              condition = `${quotedColumn} > ${dialect.param(paramIndex)}`;
               break;
             case 'gte':
-              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
-              condition = `[${columnName}] >= @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              condition = `${quotedColumn} >= ${dialect.param(paramIndex)}`;
               break;
             case 'lt':
-              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
-              condition = `[${columnName}] < @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              condition = `${quotedColumn} < ${dialect.param(paramIndex)}`;
               break;
             case 'lte':
-              filterParams.push({ name: paramName, value: Number(value), type: sqlType });
-              condition = `[${columnName}] <= @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              condition = `${quotedColumn} <= ${dialect.param(paramIndex)}`;
               break;
             case 'between':
               if (typeof value === 'object' && 'from' in value && 'to' in value) {
-                const fromParam = `filter${paramIndex}`;
-                const toParam = `filter${paramIndex + 1}`;
-                filterParams.push({ name: fromParam, value: Number(value.from), type: sqlType });
-                filterParams.push({ name: toParam, value: Number(value.to), type: sqlType });
-                condition = `[${columnName}] BETWEEN @${fromParam} AND @${toParam}`;
+                const fromParamIndex = paramIndex;
+                const toParamIndex = paramIndex + 1;
+                filterParams.push({ name: `filter${fromParamIndex}`, value: Number(value.from) });
+                filterParams.push({ name: `filter${toParamIndex}`, value: Number(value.to) });
+                condition = `${quotedColumn} BETWEEN ${dialect.param(fromParamIndex)} AND ${dialect.param(toParamIndex)}`;
                 paramIndex++; // Extra increment for second param
               }
               break;
             
             // Date operators
             case 'dateEq':
-              filterParams.push({ name: paramName, value: String(value), type: sqlType });
-              condition = `CAST([${columnName}] AS DATE) = CAST(@${paramName} AS DATE)`;
+              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              condition = `${dialect.castToDate(quotedColumn)} = ${dialect.castToDate(dialect.param(paramIndex))}`;
               break;
             case 'dateAfter':
-              filterParams.push({ name: paramName, value: String(value), type: sqlType });
-              condition = `CAST([${columnName}] AS DATE) > CAST(@${paramName} AS DATE)`;
+              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              condition = `${dialect.castToDate(quotedColumn)} > ${dialect.castToDate(dialect.param(paramIndex))}`;
               break;
             case 'dateBefore':
-              filterParams.push({ name: paramName, value: String(value), type: sqlType });
-              condition = `CAST([${columnName}] AS DATE) < CAST(@${paramName} AS DATE)`;
+              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              condition = `${dialect.castToDate(quotedColumn)} < ${dialect.castToDate(dialect.param(paramIndex))}`;
               break;
             case 'dateBetween':
               if (typeof value === 'object' && 'from' in value && 'to' in value) {
-                const fromParam = `filter${paramIndex}`;
-                const toParam = `filter${paramIndex + 1}`;
-                filterParams.push({ name: fromParam, value: String(value.from), type: sqlType });
-                filterParams.push({ name: toParam, value: String(value.to), type: sqlType });
-                condition = `CAST([${columnName}] AS DATE) BETWEEN CAST(@${fromParam} AS DATE) AND CAST(@${toParam} AS DATE)`;
+                const fromParamIndex = paramIndex;
+                const toParamIndex = paramIndex + 1;
+                filterParams.push({ name: `filter${fromParamIndex}`, value: String(value.from) });
+                filterParams.push({ name: `filter${toParamIndex}`, value: String(value.to) });
+                condition = `${dialect.castToDate(quotedColumn)} BETWEEN ${dialect.castToDate(dialect.param(fromParamIndex))} AND ${dialect.castToDate(dialect.param(toParamIndex))}`;
                 paramIndex++; // Extra increment for second param
               }
               break;
@@ -355,21 +369,22 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
             case 'in':
             case 'notIn':
               if (Array.isArray(value) && value.length > 0) {
-                const placeholders = value.map((_, i) => `@${paramName}_${i}`).join(', ');
+                const placeholders: string[] = [];
                 value.forEach((val, i) => {
-                  filterParams.push({ name: `${paramName}_${i}`, value: val, type: sqlType });
+                  const currentIndex = paramIndex + i;
+                  filterParams.push({ name: `filter${currentIndex}`, value: val });
+                  placeholders.push(dialect.param(currentIndex));
                 });
                 const inOperator = operator === 'in' ? 'IN' : 'NOT IN';
-                condition = `[${columnName}] ${inOperator} (${placeholders})`;
-                // Don't increment paramIndex here as we handle it per value
+                condition = `${quotedColumn} ${inOperator} (${placeholders.join(', ')})`;
                 paramIndex += value.length - 1; // Adjust for multiple params
               }
               break;
             
             default:
               console.warn(`Unknown filter operator: ${operator}, falling back to contains`);
-              filterParams.push({ name: paramName, value: `%${String(value)}%`, type: sql.NVarChar });
-              condition = `[${columnName}] LIKE @${paramName}`;
+              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}%` });
+              condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
           }
           
           if (condition) {
@@ -391,13 +406,16 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     // For joined data queries, qualify filtered columns to avoid ambiguity
     // (e.g. same column names existing on referenced FK tables).
     const qualifiedDataWhereClause = parsedFilters.reduce((clause, filter) => {
-      const escapedColumn = filter.column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(`\\[${escapedColumn}\\]`, 'g');
-      return clause.replace(pattern, `[t].[${filter.column}]`);
+      const quotedColumn = dialect.quoteId(filter.column);
+      const quotedTableColumn = `${dialect.quoteId('t')}.${quotedColumn}`;
+      // Replace the quoted column with table-qualified version
+      return clause.replace(new RegExp(quotedColumn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), quotedTableColumn);
     }, whereClause);
     
     // Get total count with filters
-    const countQuery = `SELECT COUNT(*) as total FROM [${schema}].[${table}]${whereClause ? ' ' + whereClause : ''}`;
+    const quotedSchema = dialect.quoteId(schema);
+    const quotedTable = dialect.quoteId(table);
+    const countQuery = `SELECT COUNT(*) as total FROM ${quotedSchema}.${quotedTable}${whereClause ? ' ' + whereClause : ''}`;
     const countResult = await executeQuery(countQuery, filterParams.length > 0 ? filterParams : []);
     const total = countResult[0]?.total || 0;
     
@@ -409,18 +427,21 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     if (orderByColumn) {
       try {
         const validateQuery = `
-          SELECT COLUMN_NAME 
-          FROM INFORMATION_SCHEMA.COLUMNS 
-          WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table AND COLUMN_NAME = @column
+          SELECT column_name 
+          FROM information_schema.columns 
+          WHERE table_schema = ${dialect.param(1)} AND table_name = ${dialect.param(2)} AND column_name = ${dialect.param(3)}
         `;
         const validateResult = await executeQuery(validateQuery, [
-          { name: 'schema', value: schema, type: sql.NVarChar },
-          { name: 'table', value: table, type: sql.NVarChar },
-          { name: 'column', value: orderByColumn, type: sql.NVarChar }
+          { name: 'schema', value: schema },
+          { name: 'table', value: table },
+          { name: 'column', value: orderByColumn }
         ]);
         if (validateResult.length === 0) {
           // Column doesn't exist in this table, reset to empty
           orderByColumn = '';
+        } else {
+          // Normalize column name (PostgreSQL returns lowercase)
+          orderByColumn = validateResult[0].column_name || validateResult[0].COLUMN_NAME || orderByColumn;
         }
       } catch (e) {
         // If validation fails, reset to empty
@@ -431,18 +452,20 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     // If no sort column specified (or validation failed), get first column
     if (!orderByColumn) {
       try {
+        const topClause = dialect.topN(1);
         const structureQuery = `
-          SELECT TOP 1 COLUMN_NAME 
-          FROM INFORMATION_SCHEMA.COLUMNS 
-          WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
-          ORDER BY ORDINAL_POSITION
+          SELECT ${topClause ? topClause + ' ' : ''}column_name 
+          FROM information_schema.columns 
+          WHERE table_schema = ${dialect.param(1)} AND table_name = ${dialect.param(2)}
+          ORDER BY ordinal_position
+          ${!topClause ? dialect.limitOffset(0, 1) : ''}
         `;
         const structureResult = await executeQuery(structureQuery, [
-          { name: 'schema', value: schema, type: sql.NVarChar },
-          { name: 'table', value: table, type: sql.NVarChar }
+          { name: 'schema', value: schema },
+          { name: 'table', value: table }
         ]);
         if (structureResult.length > 0) {
-          orderByColumn = structureResult[0].COLUMN_NAME;
+          orderByColumn = structureResult[0].column_name || structureResult[0].COLUMN_NAME;
         }
       } catch (e) {
         // If we can't get column, will use alternative approach
@@ -465,28 +488,28 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     // JOINs/selects are still only added when display mode requires them.
     const fkQuery = `
         SELECT 
-          kcu1.COLUMN_NAME as fkColumnName,
-          kcu2.TABLE_SCHEMA as referencedSchema,
-          kcu2.TABLE_NAME as referencedTable,
-          kcu2.COLUMN_NAME as referencedColumn
-        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1
-          ON rc.CONSTRAINT_CATALOG = kcu1.CONSTRAINT_CATALOG
-          AND rc.CONSTRAINT_SCHEMA = kcu1.CONSTRAINT_SCHEMA
-          AND rc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
-          ON rc.UNIQUE_CONSTRAINT_CATALOG = kcu2.CONSTRAINT_CATALOG
-          AND rc.UNIQUE_CONSTRAINT_SCHEMA = kcu2.CONSTRAINT_SCHEMA
-          AND rc.UNIQUE_CONSTRAINT_NAME = kcu2.CONSTRAINT_NAME
-          AND kcu1.ORDINAL_POSITION = kcu2.ORDINAL_POSITION
-        WHERE kcu1.TABLE_SCHEMA = @schema
-          AND kcu1.TABLE_NAME = @table
+          kcu1.column_name as "fkColumnName",
+          kcu2.table_schema as "referencedSchema",
+          kcu2.table_name as "referencedTable",
+          kcu2.column_name as "referencedColumn"
+        FROM information_schema.referential_constraints rc
+        INNER JOIN information_schema.key_column_usage kcu1
+          ON rc.constraint_catalog = kcu1.constraint_catalog
+          AND rc.constraint_schema = kcu1.constraint_schema
+          AND rc.constraint_name = kcu1.constraint_name
+        INNER JOIN information_schema.key_column_usage kcu2
+          ON rc.unique_constraint_catalog = kcu2.constraint_catalog
+          AND rc.unique_constraint_schema = kcu2.constraint_schema
+          AND rc.unique_constraint_name = kcu2.constraint_name
+          AND kcu1.ordinal_position = kcu2.ordinal_position
+        WHERE kcu1.table_schema = ${dialect.param(1)}
+          AND kcu1.table_name = ${dialect.param(2)}
       `;
       
     console.log('Fetching foreign keys with query:', fkQuery);
     const foreignKeys = await executeQuery(fkQuery, [
-      { name: 'schema', value: schema, type: sql.NVarChar },
-      { name: 'table', value: table, type: sql.NVarChar }
+      { name: 'schema', value: schema },
+      { name: 'table', value: table }
     ]);
     console.log(`Found ${foreignKeys.length} foreign key(s)`);
     
@@ -494,27 +517,27 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     if (foreignKeys.length > 0) {
       // Get unique referenced tables
       const uniqueRefTables = Array.from(
-        new Set(foreignKeys.map((fk: any) => `${fk.referencedSchema}.${fk.referencedTable}`))
+        new Set(foreignKeys.map((fk: any) => `${fk.referencedSchema || fk.referenced_schema}.${fk.referencedTable || fk.referenced_table}`))
       );
       
       // Build a single query to get all columns from all referenced tables
       const tableConditions = uniqueRefTables.map((tableRef, idx) => {
         const [refSchema, refTable] = tableRef.split('.');
-        return `(TABLE_SCHEMA = @refSchema${idx} AND TABLE_NAME = @refTable${idx})`;
+        return `(table_schema = ${dialect.param(idx * 2 + 1)} AND table_name = ${dialect.param(idx * 2 + 2)})`;
       }).join(' OR ');
       
       const batchColumnsQuery = `
-        SELECT TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION
-        FROM INFORMATION_SCHEMA.COLUMNS
+        SELECT table_schema, table_name, column_name, data_type, ordinal_position
+        FROM information_schema.columns
         WHERE ${tableConditions}
-        ORDER BY TABLE_SCHEMA, TABLE_NAME, ORDINAL_POSITION
+        ORDER BY table_schema, table_name, ordinal_position
       `;
       
-      const batchParams = uniqueRefTables.flatMap((tableRef, idx) => {
+      const batchParams = uniqueRefTables.flatMap((tableRef) => {
         const [refSchema, refTable] = tableRef.split('.');
         return [
-          { name: `refSchema${idx}`, value: refSchema, type: sql.NVarChar },
-          { name: `refTable${idx}`, value: refTable, type: sql.NVarChar }
+          { name: 'refSchema', value: refSchema },
+          { name: 'refTable', value: refTable }
         ];
       });
       
@@ -526,7 +549,9 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
       // Group columns by table
       const columnsByTable: Record<string, any[]> = {};
       allRefColumns.forEach((col: any) => {
-        const key = `${col.TABLE_SCHEMA}.${col.TABLE_NAME}`;
+        const schemaName = col.table_schema || col.TABLE_SCHEMA;
+        const tableName = col.table_name || col.TABLE_NAME;
+        const key = `${schemaName}.${tableName}`;
         if (!columnsByTable[key]) {
           columnsByTable[key] = [];
         }
@@ -535,10 +560,10 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
       
       // Process each foreign key
       for (const fk of foreignKeys) {
-        const fkColumn = fk.fkColumnName;
-        const refSchema = fk.referencedSchema;
-        const refTable = fk.referencedTable;
-        const refColumn = fk.referencedColumn;
+        const fkColumn = fk.fkColumnName || fk.fk_column_name;
+        const refSchema = fk.referencedSchema || fk.referenced_schema;
+        const refTable = fk.referencedTable || fk.referenced_table;
+        const refColumn = fk.referencedColumn || fk.referenced_column;
         const tableKey = `${refSchema}.${refTable}`;
         const refColumns = columnsByTable[tableKey] || [];
         
@@ -547,22 +572,24 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         let displayColumn: string | null = null;
         
         for (const preferredName of preferredNames) {
-          const found = refColumns.find((col: any) => 
-            col.COLUMN_NAME.toLowerCase() === preferredName.toLowerCase()
-          );
+          const found = refColumns.find((col: any) => {
+            const colName = col.column_name || col.COLUMN_NAME;
+            return colName.toLowerCase() === preferredName.toLowerCase();
+          });
           if (found) {
-            displayColumn = found.COLUMN_NAME;
+            displayColumn = found.column_name || found.COLUMN_NAME;
             break;
           }
         }
         
         if (!displayColumn) {
           const stringTypes = ['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'];
-          const found = refColumns.find((col: any) => 
-            stringTypes.some(type => col.DATA_TYPE.toLowerCase().includes(type))
-          );
+          const found = refColumns.find((col: any) => {
+            const dataType = col.data_type || col.DATA_TYPE;
+            return stringTypes.some(type => dataType.toLowerCase().includes(type));
+          });
           if (found) {
-            displayColumn = found.COLUMN_NAME;
+            displayColumn = found.column_name || found.COLUMN_NAME;
           }
         }
         
@@ -577,7 +604,7 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
               refColumn,
               displayColumn
             });
-            fkSelects.push(`${alias}.[${displayColumn}] as [${fkColumn}_display]`);
+            fkSelects.push(`${dialect.quoteId(alias)}.${dialect.quoteId(displayColumn)} as ${dialect.quoteId(`${fkColumn}_display`)}`);
           }
           fkDisplayColumns[fkColumn] = displayColumn;
         }
@@ -586,41 +613,53 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     
     // Build the SELECT query with JOINs
     const baseTableAlias = 't';
+    const quotedTableAlias = dialect.quoteId(baseTableAlias);
     // For 'display-only' mode, exclude FK key columns from SELECT
-    let baseSelects = `[${baseTableAlias}].*`;
+    let baseSelects = `${quotedTableAlias}.*`;
     if (fkDisplayMode === 'display-only') {
       // Exclude FK columns that have display columns
       const fkColumnNames = fkJoins.map(fk => fk.fkColumn);
       if (fkColumnNames.length > 0) {
         // We'll need to list all columns except FK columns
         // For now, we'll select all and handle exclusion in the response
-        baseSelects = `[${baseTableAlias}].*`;
+        baseSelects = `${quotedTableAlias}.*`;
       }
     }
     const allSelects = `${baseSelects}${fkSelects.length > 0 ? ', ' + fkSelects.join(', ') : ''}`;
     
     // Build JOIN clauses using the table alias
     const buildJoinClauses = (tableAlias: string) => {
-      return fkJoins.map((fk: any) => 
-        `LEFT JOIN [${fk.refSchema}].[${fk.refTable}] ${fk.alias} ON [${tableAlias}].[${fk.fkColumn}] = ${fk.alias}.[${fk.refColumn}]`
-      ).join('\n        ');
+      const quotedAlias = dialect.quoteId(tableAlias);
+      return fkJoins.map((fk: any) => {
+        const quotedRefSchema = dialect.quoteId(fk.refSchema);
+        const quotedRefTable = dialect.quoteId(fk.refTable);
+        const quotedAliasName = dialect.quoteId(fk.alias);
+        const quotedFkColumn = dialect.quoteId(fk.fkColumn);
+        const quotedRefColumn = dialect.quoteId(fk.refColumn);
+        return `LEFT JOIN ${quotedRefSchema}.${quotedRefTable} ${quotedAliasName} ON ${quotedAlias}.${quotedFkColumn} = ${quotedAliasName}.${quotedRefColumn}`;
+      }).join('\n        ');
     };
     
     let data;
     let generatedQuery = '';
     
+    // Calculate parameter indices for offset and pageSize
+    const offsetParamIndex = filterParams.length + 1;
+    const pageSizeParamIndex = filterParams.length + 2;
+    
     if (orderByColumn) {
+      const quotedOrderByColumn = dialect.quoteId(orderByColumn);
+      const limitOffsetClause = dialect.limitOffset(offset, pageSize);
       const dataQuery = `
         SELECT ${allSelects}
-        FROM [${schema}].[${table}] ${baseTableAlias}
+        FROM ${quotedSchema}.${quotedTable} ${quotedTableAlias}
         ${buildJoinClauses(baseTableAlias)}
         ${qualifiedDataWhereClause}
-        ORDER BY ${baseTableAlias}.[${orderByColumn}] ${orderByDirection}
-        OFFSET @offset ROWS
-        FETCH NEXT @pageSize ROWS ONLY
+        ORDER BY ${quotedTableAlias}.${quotedOrderByColumn} ${orderByDirection}
+        ${limitOffsetClause}
       `;
       
-      generatedQuery = `SELECT ${allSelects}\nFROM [${schema}].[${table}] ${baseTableAlias}${fkJoins.length > 0 ? '\n' + buildJoinClauses(baseTableAlias) : ''}${qualifiedDataWhereClause ? '\n' + qualifiedDataWhereClause : ''}\nORDER BY ${baseTableAlias}.[${orderByColumn}] ${orderByDirection}\nOFFSET ${offset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
+      generatedQuery = `SELECT ${allSelects}\nFROM ${quotedSchema}.${quotedTable} ${quotedTableAlias}${fkJoins.length > 0 ? '\n' + buildJoinClauses(baseTableAlias) : ''}${qualifiedDataWhereClause ? '\n' + qualifiedDataWhereClause : ''}\nORDER BY ${quotedTableAlias}.${quotedOrderByColumn} ${orderByDirection}\n${limitOffsetClause}`;
       
       console.log('Executing SQL query:', dataQuery);
       console.log('Query parameters:', {
@@ -629,29 +668,23 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         filterParams: filterParams.map(p => ({ name: p.name, value: p.value }))
       });
       
-      data = await executeQuery(dataQuery, [
-        { name: 'offset', value: offset, type: sql.Int },
-        { name: 'pageSize', value: pageSize, type: sql.Int },
-        ...filterParams
-      ]);
+      // offset and pageSize are embedded in limitOffsetClause, so we only pass filterParams
+      data = await executeQuery(dataQuery, filterParams);
     } else {
-      // For the fallback case with ROW_NUMBER, we need to apply JOINs after pagination
-      // First get the paginated data, then join with foreign keys
-      const innerQuery = `
-        SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as rn
-        FROM [${schema}].[${table}]
-        ${whereClause}
-      `;
+      // For the fallback case, use LIMIT/OFFSET directly (works for both databases)
+      // PostgreSQL doesn't need ROW_NUMBER for this case
+      const dbType = getDbType();
+      const limitOffsetClause = dialect.limitOffset(offset, pageSize);
       
       const dataQuery = `
         SELECT ${allSelects}
-        FROM (${innerQuery}) ${baseTableAlias}
+        FROM ${quotedSchema}.${quotedTable} ${quotedTableAlias}
         ${buildJoinClauses(baseTableAlias)}
-        WHERE ${baseTableAlias}.rn > @offset AND ${baseTableAlias}.rn <= @offset + @pageSize
-        ORDER BY ${baseTableAlias}.rn
+        ${qualifiedDataWhereClause}
+        ${limitOffsetClause}
       `;
       
-      generatedQuery = `SELECT ${allSelects}\nFROM (\n  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as rn\n  FROM [${schema}].[${table}]${whereClause ? '\n  ' + whereClause : ''}\n) ${baseTableAlias}${fkJoins.length > 0 ? '\n' + buildJoinClauses(baseTableAlias) : ''}\nWHERE ${baseTableAlias}.rn > ${offset} AND ${baseTableAlias}.rn <= ${offset + pageSize}\nORDER BY ${baseTableAlias}.rn`;
+      generatedQuery = `SELECT ${allSelects}\nFROM ${quotedSchema}.${quotedTable} ${quotedTableAlias}${fkJoins.length > 0 ? '\n' + buildJoinClauses(baseTableAlias) : ''}${qualifiedDataWhereClause ? '\n' + qualifiedDataWhereClause : ''}\n${limitOffsetClause}`;
       
       console.log('Executing SQL query:', dataQuery);
       console.log('Query parameters:', {
@@ -660,17 +693,8 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         filterParams: filterParams.map(p => ({ name: p.name, value: p.value }))
       });
       
-      data = await executeQuery(dataQuery, [
-        { name: 'offset', value: offset, type: sql.Int },
-        { name: 'pageSize', value: pageSize, type: sql.Int },
-        ...filterParams
-      ]);
-      
-      // Remove the rn column from results
-      data = data.map((row: any) => {
-        const { rn, ...rest } = row;
-        return rest;
-      });
+      // offset and pageSize are embedded in limitOffsetClause, so we only pass filterParams
+      data = await executeQuery(dataQuery, filterParams);
     }
     
     // For 'display-only' mode, remove FK key columns from data and rename display columns
@@ -707,10 +731,25 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         filterParams.map((p) => [p.name, p.value])
       );
 
-      generatedQuery = generatedQuery.replace(/@([A-Za-z0-9_]+)/g, (full, name) => {
-        if (!paramValues.has(name)) return full;
-        return formatSqlLiteral(paramValues.get(name));
-      });
+      // Replace parameter placeholders with actual values for display
+      const dbType = getDbType();
+      if (dbType === 'postgres') {
+        // PostgreSQL uses $1, $2, etc.
+        let paramIndex = 1;
+        generatedQuery = generatedQuery.replace(/\$(\d+)/g, (full, index) => {
+          const idx = parseInt(index, 10) - 1;
+          if (idx < filterParams.length) {
+            return formatSqlLiteral(filterParams[idx].value);
+          }
+          return full;
+        });
+      } else {
+        // MSSQL uses @paramName
+        generatedQuery = generatedQuery.replace(/@([A-Za-z0-9_]+)/g, (full, name) => {
+          if (!paramValues.has(name)) return full;
+          return formatSqlLiteral(paramValues.get(name));
+        });
+      }
     }
     
     res.json({
@@ -729,9 +768,9 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
     console.error('Error fetching table data:', error);
     // Check if it's an authentication error
     const errorMessage = error.message || '';
-    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
       // Disconnect on authentication failure
-      const { disconnect } = await import('../db/mssql.js');
+      const { disconnect } = await import('../db/index.js');
       await disconnect();
     }
     
@@ -771,52 +810,40 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
     }
     
     const pool = getConnection();
-    if (!pool || !pool.connected) {
+    if (!pool) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
     
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
+    
     // Get columns from referenced table to find display column and referenced column type
     const columnsQuery = `
-      SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = @refSchema
-        AND TABLE_NAME = @refTable
-      ORDER BY ORDINAL_POSITION
+      SELECT column_name, data_type, character_maximum_length
+      FROM information_schema.columns
+      WHERE table_schema = ${dialect.param(1)}
+        AND table_name = ${dialect.param(2)}
+      ORDER BY ordinal_position
     `;
     
     const columns = await executeQuery(columnsQuery, [
-      { name: 'refSchema', value: referencedSchema, type: sql.NVarChar },
-      { name: 'refTable', value: referencedTable, type: sql.NVarChar }
+      { name: 'refSchema', value: referencedSchema },
+      { name: 'refTable', value: referencedTable }
     ]);
     
     // Find the referenced column to get its data type
-    const referencedColInfo = columns.find((col: any) => 
-      col.COLUMN_NAME === referencedColumn
-    );
+    const referencedColInfo = columns.find((col: any) => {
+      const colName = col.column_name || col.COLUMN_NAME;
+      return colName === referencedColumn;
+    });
     
     if (!referencedColInfo) {
       return res.status(400).json({ error: `Referenced column '${referencedColumn}' not found` });
     }
-    
-    // Map SQL Server data types to mssql parameter types
-    const getSqlType = (dataType: string): any => {
-      const dt = dataType.toLowerCase();
-      if (dt === 'int' || dt === 'integer') return sql.Int;
-      if (dt === 'bigint') return sql.BigInt;
-      if (dt === 'smallint') return sql.SmallInt;
-      if (dt === 'tinyint') return sql.TinyInt;
-      if (dt === 'bit') return sql.Bit;
-      if (dt === 'float' || dt === 'real' || dt === 'double precision') return sql.Float;
-      if (dt === 'decimal' || dt === 'numeric' || dt === 'money' || dt === 'smallmoney') return sql.Decimal(18, 0);
-      if (dt === 'datetime' || dt === 'datetime2' || dt === 'smalldatetime') return sql.DateTime;
-      if (dt === 'date') return sql.Date;
-      if (dt === 'time') return sql.Time;
-      if (dt === 'uniqueidentifier') return sql.UniqueIdentifier;
-      // Default to string types
-      return sql.NVarChar;
-    };
-    
-    const referencedColumnType = getSqlType(referencedColInfo.DATA_TYPE);
     
     // Find display column: prefer name, title, description, code, or first string column
     const preferredNames = ['name', 'title', 'description', 'code'];
@@ -824,11 +851,12 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
     
     // First, try to find a column with preferred name
     for (const preferredName of preferredNames) {
-      const found = columns.find((col: any) => 
-        col.COLUMN_NAME.toLowerCase() === preferredName.toLowerCase()
-      );
+      const found = columns.find((col: any) => {
+        const colName = col.column_name || col.COLUMN_NAME;
+        return colName.toLowerCase() === preferredName.toLowerCase();
+      });
       if (found) {
-        displayColumn = found.COLUMN_NAME;
+        displayColumn = found.column_name || found.COLUMN_NAME;
         break;
       }
     }
@@ -836,31 +864,36 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
     // If not found, find first string column (varchar, nvarchar, char, nchar, text, ntext)
     if (!displayColumn) {
       const stringTypes = ['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'];
-      const found = columns.find((col: any) => 
-        stringTypes.some(type => col.DATA_TYPE.toLowerCase().includes(type))
-      );
+      const found = columns.find((col: any) => {
+        const dataType = col.data_type || col.DATA_TYPE;
+        return stringTypes.some(type => dataType.toLowerCase().includes(type));
+      });
       if (found) {
-        displayColumn = found.COLUMN_NAME;
+        displayColumn = found.column_name || found.COLUMN_NAME;
       }
     }
     
     // Build query to fetch related data
     // Use IN clause with parameterized values
-    const placeholders = ids.map((_, i) => `@id${i}`).join(', ');
+    const quotedRefSchema = dialect.quoteId(referencedSchema);
+    const quotedRefTable = dialect.quoteId(referencedTable);
+    const quotedRefColumn = dialect.quoteId(referencedColumn);
+    const quotedDisplayColumn = displayColumn ? dialect.quoteId(displayColumn) : null;
+    
+    const placeholders = ids.map((_, i) => dialect.param(i + 1)).join(', ');
     const selectColumns = displayColumn 
-      ? `[${referencedColumn}], [${displayColumn}]`
-      : `[${referencedColumn}]`;
+      ? `${quotedRefColumn}, ${quotedDisplayColumn}`
+      : quotedRefColumn;
     
     const dataQuery = `
       SELECT ${selectColumns}
-      FROM [${referencedSchema}].[${referencedTable}]
-      WHERE [${referencedColumn}] IN (${placeholders})
+      FROM ${quotedRefSchema}.${quotedRefTable}
+      WHERE ${quotedRefColumn} IN (${placeholders})
     `;
     
-    const params = ids.map((id: any, i: number) => ({
-      name: `id${i}`,
-      value: id,
-      type: referencedColumnType
+    const params = ids.map((id: any) => ({
+      name: 'id',
+      value: id
     }));
     
     const result = await executeQuery(dataQuery, params);
@@ -876,8 +909,8 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
   } catch (error: any) {
     console.error('Error fetching related data:', error);
     const errorMessage = error.message || '';
-    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
-      const { disconnect } = await import('../db/mssql.js');
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
+      const { disconnect } = await import('../db/index.js');
       await disconnect();
     }
     res.status(500).json({ error: error.message || 'Failed to fetch related data' });
@@ -892,46 +925,53 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
     const columnsParam = req.query.columns as string; // Comma-separated column names: "keyColumn" or "keyColumn,displayColumn"
     
     const pool = getConnection();
-    if (!pool || !pool.connected) {
+    if (!pool) {
       return res.status(400).json({ error: 'Not connected to database' });
     }
+    
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
     
     // Get column info and check if it's a foreign key
     const columnQuery = `
       SELECT 
-        c.COLUMN_NAME,
-        c.DATA_TYPE,
-        fk.REFERENCED_TABLE_SCHEMA as referencedSchema,
-        fk.REFERENCED_TABLE_NAME as referencedTable,
-        fk.REFERENCED_COLUMN_NAME as referencedColumn
-      FROM INFORMATION_SCHEMA.COLUMNS c
+        c.column_name,
+        c.data_type,
+        fk.referenced_table_schema as "referencedSchema",
+        fk.referenced_table_name as "referencedTable",
+        fk.referenced_column_name as "referencedColumn"
+      FROM information_schema.columns c
       LEFT JOIN (
         SELECT 
-          kcu1.TABLE_SCHEMA,
-          kcu1.TABLE_NAME,
-          kcu1.COLUMN_NAME,
-          kcu2.TABLE_SCHEMA as REFERENCED_TABLE_SCHEMA,
-          kcu2.TABLE_NAME as REFERENCED_TABLE_NAME,
-          kcu2.COLUMN_NAME as REFERENCED_COLUMN_NAME
-        FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu1
-          ON rc.CONSTRAINT_CATALOG = kcu1.CONSTRAINT_CATALOG
-          AND rc.CONSTRAINT_SCHEMA = kcu1.CONSTRAINT_SCHEMA
-          AND rc.CONSTRAINT_NAME = kcu1.CONSTRAINT_NAME
-        INNER JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu2
-          ON rc.UNIQUE_CONSTRAINT_CATALOG = kcu2.CONSTRAINT_CATALOG
-          AND rc.UNIQUE_CONSTRAINT_SCHEMA = kcu2.CONSTRAINT_SCHEMA
-          AND rc.UNIQUE_CONSTRAINT_NAME = kcu2.CONSTRAINT_NAME
-          AND kcu1.ORDINAL_POSITION = kcu2.ORDINAL_POSITION
-      ) fk ON c.TABLE_SCHEMA = fk.TABLE_SCHEMA
-        AND c.TABLE_NAME = fk.TABLE_NAME
-        AND c.COLUMN_NAME = fk.COLUMN_NAME
-      WHERE c.TABLE_SCHEMA = @schema AND c.TABLE_NAME = @table AND c.COLUMN_NAME = @column
+          kcu1.table_schema,
+          kcu1.table_name,
+          kcu1.column_name,
+          kcu2.table_schema as referenced_table_schema,
+          kcu2.table_name as referenced_table_name,
+          kcu2.column_name as referenced_column_name
+        FROM information_schema.referential_constraints rc
+        INNER JOIN information_schema.key_column_usage kcu1
+          ON rc.constraint_catalog = kcu1.constraint_catalog
+          AND rc.constraint_schema = kcu1.constraint_schema
+          AND rc.constraint_name = kcu1.constraint_name
+        INNER JOIN information_schema.key_column_usage kcu2
+          ON rc.unique_constraint_catalog = kcu2.constraint_catalog
+          AND rc.unique_constraint_schema = kcu2.constraint_schema
+          AND rc.unique_constraint_name = kcu2.constraint_name
+          AND kcu1.ordinal_position = kcu2.ordinal_position
+      ) fk ON c.table_schema = fk.table_schema
+        AND c.table_name = fk.table_name
+        AND c.column_name = fk.column_name
+      WHERE c.table_schema = ${dialect.param(1)} AND c.table_name = ${dialect.param(2)} AND c.column_name = ${dialect.param(3)}
     `;
     const columnResult = await executeQuery(columnQuery, [
-      { name: 'schema', value: schema, type: sql.NVarChar },
-      { name: 'table', value: table, type: sql.NVarChar },
-      { name: 'column', value: column, type: sql.NVarChar }
+      { name: 'schema', value: schema },
+      { name: 'table', value: table },
+      { name: 'column', value: column }
     ]);
     
     if (columnResult.length === 0) {
@@ -939,7 +979,7 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
     }
     
     const columnInfo = columnResult[0];
-    const isForeignKey = !!columnInfo.referencedSchema && !!columnInfo.referencedTable;
+    const isForeignKey = !!(columnInfo.referencedSchema || columnInfo.referenced_schema) && !!(columnInfo.referencedTable || columnInfo.referenced_table);
     
     let query = '';
     const params: any[] = [];
@@ -947,9 +987,12 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
     
     if (isForeignKey) {
       // For FK columns, fetch from referenced table with display column
-      const refSchema = columnInfo.referencedSchema;
-      const refTable = columnInfo.referencedTable;
-      const refColumn = columnInfo.referencedColumn;
+      const refSchema = columnInfo.referencedSchema || columnInfo.referenced_schema;
+      const refTable = columnInfo.referencedTable || columnInfo.referenced_table;
+      const refColumn = columnInfo.referencedColumn || columnInfo.referenced_column;
+      const quotedRefSchema = dialect.quoteId(refSchema);
+      const quotedRefTable = dialect.quoteId(refTable);
+      const quotedRefColumn = dialect.quoteId(refColumn);
       
       // Parse comma-separated columns from frontend: "keyColumn" or "keyColumn,displayColumn"
       let columnsToSelect: string[] = [];
@@ -961,123 +1004,130 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
       if (columnsToSelect.length > 0) {
         // Use the columns from the URL parameter
         // First column is the key, second (if exists) is the display
-        const selectCols = columnsToSelect.map(col => `[${col}]`).join(', ');
-        query = `SELECT DISTINCT ${selectCols} FROM [${refSchema}].[${refTable}]`;
+        const selectCols = columnsToSelect.map(col => dialect.quoteId(col)).join(', ');
+        query = `SELECT DISTINCT ${selectCols} FROM ${quotedRefSchema}.${quotedRefTable}`;
         
         // Add search filter if provided
         if (searchQuery && searchQuery.trim()) {
-          const searchCols = columnsToSelect.map(col => `[${col}] LIKE @search`).join(' OR ');
-          query += ` WHERE (${searchCols}) AND [${refColumn}] IS NOT NULL`;
-          params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
+          const searchCols = columnsToSelect.map(col => `${dialect.quoteId(col)} LIKE ${dialect.param(1)}`).join(' OR ');
+          query += ` WHERE (${searchCols}) AND ${quotedRefColumn} IS NOT NULL`;
+          params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
         } else {
-          query += ` WHERE [${refColumn}] IS NOT NULL`;
+          query += ` WHERE ${quotedRefColumn} IS NOT NULL`;
         }
         
         // Order by first column (key) or second column (display) if available
         const orderByCol = columnsToSelect.length > 1 ? columnsToSelect[1] : columnsToSelect[0];
-        query += ` ORDER BY [${orderByCol}] OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+        query += ` ORDER BY ${dialect.quoteId(orderByCol)} ${dialect.limitOffset(0, 1000)}`;
       } else {
         // Fallback: auto-detect display column if columns not provided
         const refColumnsQuery = `
-          SELECT COLUMN_NAME, DATA_TYPE
-          FROM INFORMATION_SCHEMA.COLUMNS
-          WHERE TABLE_SCHEMA = @refSchema AND TABLE_NAME = @refTable
-          ORDER BY ORDINAL_POSITION
+          SELECT column_name, data_type
+          FROM information_schema.columns
+          WHERE table_schema = ${dialect.param(1)} AND table_name = ${dialect.param(2)}
+          ORDER BY ordinal_position
         `;
         const refColumns = await executeQuery(refColumnsQuery, [
-          { name: 'refSchema', value: refSchema, type: sql.NVarChar },
-          { name: 'refTable', value: refTable, type: sql.NVarChar }
+          { name: 'refSchema', value: refSchema },
+          { name: 'refTable', value: refTable }
         ]);
         
         // Find display column: prefer name, title, description, code, or first string column
         const preferredNames = ['name', 'title', 'description', 'code'];
         for (const preferredName of preferredNames) {
-          const found = refColumns.find((col: any) => 
-            col.COLUMN_NAME.toLowerCase() === preferredName.toLowerCase() &&
-            col.COLUMN_NAME.toLowerCase() !== refColumn.toLowerCase()
-          );
+          const found = refColumns.find((col: any) => {
+            const colName = col.column_name || col.COLUMN_NAME;
+            return colName.toLowerCase() === preferredName.toLowerCase() &&
+              colName.toLowerCase() !== refColumn.toLowerCase();
+          });
           if (found) {
-            displayColumn = found.COLUMN_NAME;
+            displayColumn = found.column_name || found.COLUMN_NAME;
             break;
           }
         }
         
         if (!displayColumn) {
           const stringTypes = ['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'];
-          const found = refColumns.find((col: any) => 
-            col.COLUMN_NAME.toLowerCase() !== refColumn.toLowerCase() &&
-            stringTypes.some(type => col.DATA_TYPE.toLowerCase().includes(type))
-          );
+          const found = refColumns.find((col: any) => {
+            const colName = col.column_name || col.COLUMN_NAME;
+            const dataType = col.data_type || col.DATA_TYPE;
+            return colName.toLowerCase() !== refColumn.toLowerCase() &&
+              stringTypes.some(type => dataType.toLowerCase().includes(type));
+          });
           if (found) {
-            displayColumn = found.COLUMN_NAME;
+            displayColumn = found.column_name || found.COLUMN_NAME;
           }
         }
         
         // Build query with auto-detected display column
+        const quotedDisplayColumn = displayColumn ? dialect.quoteId(displayColumn) : null;
         const selectCols = displayColumn 
-          ? `[${refColumn}], [${displayColumn}]`
-          : `[${refColumn}]`;
+          ? `${quotedRefColumn}, ${quotedDisplayColumn}`
+          : quotedRefColumn;
         
-        query = `SELECT DISTINCT ${selectCols} FROM [${refSchema}].[${refTable}]`;
+        query = `SELECT DISTINCT ${selectCols} FROM ${quotedRefSchema}.${quotedRefTable}`;
         
         // Add search filter if provided
         if (searchQuery && searchQuery.trim()) {
           if (displayColumn) {
-            query += ` WHERE [${displayColumn}] LIKE @search OR [${refColumn}] LIKE @search`;
+            query += ` WHERE ${quotedDisplayColumn} LIKE ${dialect.param(1)} OR ${quotedRefColumn} LIKE ${dialect.param(1)}`;
           } else {
-            query += ` WHERE [${refColumn}] LIKE @search`;
+            query += ` WHERE ${quotedRefColumn} LIKE ${dialect.param(1)}`;
           }
-          params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
-          query += ` AND [${refColumn}] IS NOT NULL`;
+          params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
+          query += ` AND ${quotedRefColumn} IS NOT NULL`;
         } else {
-          query += ` WHERE [${refColumn}] IS NOT NULL`;
+          query += ` WHERE ${quotedRefColumn} IS NOT NULL`;
         }
         
         // Order by display column if available, otherwise by key
-        query += ` ORDER BY ${displayColumn ? `[${displayColumn}]` : `[${refColumn}]`} OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+        query += ` ORDER BY ${displayColumn ? quotedDisplayColumn : quotedRefColumn} ${dialect.limitOffset(0, 1000)}`;
       }
     } else {
       // For regular columns, fetch from current table.
       // If "columns" is provided, honor it so FK filter option requests like
       // "id,name" still return display values when querying the referenced table directly.
-      const dataType = columnInfo.DATA_TYPE.toLowerCase();
+      const dataType = (columnInfo.data_type || columnInfo.DATA_TYPE || '').toLowerCase();
+      const quotedSchema = dialect.quoteId(schema);
+      const quotedTable = dialect.quoteId(table);
+      const quotedColumn = dialect.quoteId(column);
       const columnsToSelect = columnsParam
         ? columnsParam.split(',').map(c => c.trim()).filter(c => c)
         : [];
 
       if (columnsToSelect.length > 0) {
-        const escapedColumns = columnsToSelect.map(col => col.replace(/]/g, ']]'));
-        const keyColumn = escapedColumns[0];
-        const orderByColumn = escapedColumns.length > 1 ? escapedColumns[1] : keyColumn;
-        query = `SELECT DISTINCT ${escapedColumns.map(col => `[${col}]`).join(', ')} FROM [${schema}].[${table}]`;
+        const quotedColumns = columnsToSelect.map(col => dialect.quoteId(col));
+        const keyColumn = quotedColumns[0];
+        const orderByColumn = quotedColumns.length > 1 ? quotedColumns[1] : quotedColumns[0];
+        query = `SELECT DISTINCT ${quotedColumns.join(', ')} FROM ${quotedSchema}.${quotedTable}`;
 
         if (searchQuery && searchQuery.trim()) {
-          const searchCols = escapedColumns.map(col => `TRY_CAST([${col}] AS NVARCHAR(4000)) LIKE @search`).join(' OR ');
-          query += ` WHERE (${searchCols}) AND [${keyColumn}] IS NOT NULL`;
-          params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
+          const searchCols = quotedColumns.map(col => `${dialect.tryCastToNVarChar(col)} LIKE ${dialect.param(1)}`).join(' OR ');
+          query += ` WHERE (${searchCols}) AND ${keyColumn} IS NOT NULL`;
+          params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
         } else {
-          query += ` WHERE [${keyColumn}] IS NOT NULL`;
+          query += ` WHERE ${keyColumn} IS NOT NULL`;
         }
 
-        query += ` ORDER BY [${orderByColumn}] OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+        query += ` ORDER BY ${orderByColumn} ${dialect.limitOffset(0, 1000)}`;
       } else {
         // Return actual column name, not aliased
-        query = `SELECT DISTINCT [${column}] FROM [${schema}].[${table}]`;
+        query = `SELECT DISTINCT ${quotedColumn} FROM ${quotedSchema}.${quotedTable}`;
         
         // Add search filter if provided
         if (searchQuery && searchQuery.trim()) {
           if (['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'].some(t => dataType.includes(t))) {
-            query += ` WHERE [${column}] LIKE @search`;
-            params.push({ name: 'search', value: `%${searchQuery.trim()}%`, type: sql.NVarChar });
-            query += ` AND [${column}] IS NOT NULL`;
+            query += ` WHERE ${quotedColumn} LIKE ${dialect.param(1)}`;
+            params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
+            query += ` AND ${quotedColumn} IS NOT NULL`;
           } else {
-            query += ` WHERE [${column}] IS NOT NULL`;
+            query += ` WHERE ${quotedColumn} IS NOT NULL`;
           }
         } else {
-          query += ` WHERE [${column}] IS NOT NULL`;
+          query += ` WHERE ${quotedColumn} IS NOT NULL`;
         }
         
-        query += ` ORDER BY [${column}] OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY`;
+        query += ` ORDER BY ${quotedColumn} ${dialect.limitOffset(0, 1000)}`;
       }
     }
     
@@ -1090,8 +1140,8 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
   } catch (error: any) {
     console.error('Error fetching distinct values:', error);
     const errorMessage = error.message || '';
-    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication')) {
-      const { disconnect } = await import('../db/mssql.js');
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
+      const { disconnect } = await import('../db/index.js');
       await disconnect();
     }
     res.status(500).json({ error: error.message || 'Failed to fetch distinct values' });

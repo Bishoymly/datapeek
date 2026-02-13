@@ -116,7 +116,7 @@ export async function connect(config: ConnectionConfig | string): Promise<void> 
     },
     options: {
       ...connectionConfig.options,
-      requestTimeout: 120000 // 2 minutes for queries (increased for complex queries with JOINs)
+      requestTimeout: 1800000 // 30 minutes for queries
     }
   };
   
@@ -147,7 +147,8 @@ export function getConnection(): ConnectionPool | null {
 
 export async function executeQuery(
   query: string, 
-  parameters?: Array<{ name: string; value: any; type?: any }>
+  parameters?: Array<{ name: string; value: any; type?: any }>,
+  queryId?: string
 ): Promise<any[]> {
   if (!pool || !pool.connected) {
     throw new Error('Not connected to database');
@@ -155,7 +156,19 @@ export async function executeQuery(
   
   const request = pool.request();
   // Set request timeout (overrides pool default if needed)
-  request.timeout = 120000; // 2 minutes
+  request.timeout = 1800000; // 30 minutes
+  
+  // Register for cancellation if queryId provided
+  if (queryId) {
+    const { registerQuery, unregisterQuery } = await import('./queryCancellation.js');
+    registerQuery(queryId, () => {
+      try {
+        request.cancel();
+      } catch (e) {
+        // Ignore cancellation errors
+      }
+    });
+  }
   
   if (parameters) {
     for (const param of parameters) {
@@ -169,8 +182,25 @@ export async function executeQuery(
   
   try {
     const result = await request.query(query);
+    // Unregister on success
+    if (queryId) {
+      const { unregisterQuery } = await import('./queryCancellation.js');
+      unregisterQuery(queryId);
+    }
     return result.recordset || [];
   } catch (error: any) {
+    // Unregister on error
+    if (queryId) {
+      const { unregisterQuery } = await import('./queryCancellation.js');
+      unregisterQuery(queryId);
+    }
+    // Check if it's a cancellation error
+    if (error.code === 'ECANCEL' || error.message?.includes('cancel')) {
+      const cancelError: any = new Error('Query was cancelled by user');
+      cancelError.code = 'ECANCEL';
+      cancelError.cancelled = true;
+      throw cancelError;
+    }
     // Enhance timeout error messages
     if (error.code === 'ETIMEOUT' || error.code === 'ESOCKET' || error.message?.includes('timeout') || error.message?.includes('ETIMEDOUT')) {
       const timeoutError: any = new Error('Query execution timeout. The query took too long to execute. Try disabling foreign key displays or reducing the page size.');
@@ -184,7 +214,8 @@ export async function executeQuery(
 
 export async function executeQueryMultiple(
   query: string, 
-  parameters?: Array<{ name: string; value: any; type?: any }>
+  parameters?: Array<{ name: string; value: any; type?: any }>,
+  queryId?: string
 ): Promise<{ recordsets: any[][]; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
   if (!pool || !pool.connected) {
     throw new Error('Not connected to database');
@@ -192,7 +223,19 @@ export async function executeQueryMultiple(
   
   const request = pool.request();
   // Set request timeout (overrides pool default if needed)
-  request.timeout = 120000; // 2 minutes
+  request.timeout = 1800000; // 30 minutes
+  
+  // Register for cancellation if queryId provided
+  if (queryId) {
+    const { registerQuery, unregisterQuery } = await import('./queryCancellation.js');
+    registerQuery(queryId, () => {
+      try {
+        request.cancel();
+      } catch (e) {
+        // Ignore cancellation errors
+      }
+    });
+  }
   
   if (parameters) {
     for (const param of parameters) {
@@ -262,7 +305,7 @@ export async function executeQueryMultiple(
               if (trimmedQuery.startsWith('SELECT')) {
                 // Execute query with TOP 0 to get column structure
                 const metadataRequest = pool.request();
-                metadataRequest.timeout = 5000;
+                metadataRequest.timeout = 1800000; // 30 minutes
                 
                 // Modify query to add TOP 0 if not present, or replace existing TOP
                 let metadataQuery = query;
@@ -294,8 +337,26 @@ export async function executeQueryMultiple(
       }
     }
     
+    // Unregister on success
+    if (queryId) {
+      const { unregisterQuery } = await import('./queryCancellation.js');
+      unregisterQuery(queryId);
+    }
+    
     return { recordsets, columnMetadata: columnMetadata.length > 0 ? columnMetadata : undefined };
   } catch (error: any) {
+    // Unregister on error
+    if (queryId) {
+      const { unregisterQuery } = await import('./queryCancellation.js');
+      unregisterQuery(queryId);
+    }
+    // Check if it's a cancellation error
+    if (error.code === 'ECANCEL' || error.message?.includes('cancel')) {
+      const cancelError: any = new Error('Query was cancelled by user');
+      cancelError.code = 'ECANCEL';
+      cancelError.cancelled = true;
+      throw cancelError;
+    }
     // Enhance timeout error messages
     if (error.code === 'ETIMEOUT' || error.code === 'ESOCKET' || error.message?.includes('timeout') || error.message?.includes('ETIMEDOUT')) {
       const timeoutError: any = new Error('Query execution timeout. The query took too long to execute. Try simplifying your query or reducing the result set size.');

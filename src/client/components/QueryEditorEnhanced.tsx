@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Editor from '@monaco-editor/react';
 import { Button } from './ui/button';
-import { Play, Loader2, AlertCircle, CheckCircle2, Clock, Download } from 'lucide-react';
+import { Play, Loader2, AlertCircle, CheckCircle2, Clock, Download, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { DataGrid } from './DataGrid';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
@@ -19,7 +20,9 @@ interface SavedQuery {
 
 interface QueryEditorEnhancedProps {
   queryId: string;
+  connectionInfo?: ConnectionInfo | null;
   onQueryUpdate?: (queryId: string, query: string) => void;
+  onQueryChange?: (query: string) => void;
 }
 
 interface QueryResult {
@@ -38,33 +41,54 @@ interface CellSelection {
   resultSetIndex?: number; // For multiple result sets
 }
 
-function getQueries(): SavedQuery[] {
+function getQueries(connectionId: string | null): SavedQuery[] {
+  if (!connectionId) return [];
   try {
-    const stored = localStorage.getItem(QUERIES_STORAGE_KEY);
+    const key = getConnectionKey(QUERIES_STORAGE_KEY, connectionId);
+    const stored = localStorage.getItem(key);
     return stored ? JSON.parse(stored) : [];
   } catch {
     return [];
   }
 }
 
-function saveQueries(queries: SavedQuery[]) {
-  localStorage.setItem(QUERIES_STORAGE_KEY, JSON.stringify(queries));
+function saveQueries(queries: SavedQuery[], connectionId: string | null) {
+  if (!connectionId) return;
+  const key = getConnectionKey(QUERIES_STORAGE_KEY, connectionId);
+  localStorage.setItem(key, JSON.stringify(queries));
 }
 
-function updateQuery(queryId: string, updates: Partial<SavedQuery>) {
-  const queries = getQueries();
+function updateQuery(queryId: string, updates: Partial<SavedQuery>, connectionId: string | null) {
+  if (!connectionId) return;
+  const queries = getQueries(connectionId);
   const index = queries.findIndex((q) => q.id === queryId);
   if (index >= 0) {
     queries[index] = { ...queries[index], ...updates, updatedAt: Date.now() };
-    saveQueries(queries);
+    saveQueries(queries, connectionId);
   }
 }
 
-export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhancedProps) {
+export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, onQueryChange }: QueryEditorEnhancedProps) {
+  const connectionId = connectionInfo?.connectionId || null;
   const [savedQuery, setSavedQuery] = useState<SavedQuery | undefined>(() => {
-    const queries = getQueries();
+    if (!connectionId) return undefined;
+    const queries = getQueries(connectionId);
     return queries.find((q) => q.id === queryId);
   });
+  
+  // Reload query when connection changes
+  useEffect(() => {
+    if (connectionId) {
+      const queries = getQueries(connectionId);
+      const found = queries.find((q) => q.id === queryId);
+      setSavedQuery(found);
+      if (found) {
+        setQuery(found.query);
+      }
+    } else {
+      setSavedQuery(undefined);
+    }
+  }, [connectionId, queryId]);
   const [query, setQuery] = useState(savedQuery?.query || 'SELECT TOP 100 * FROM ');
   const [isDark, setIsDark] = useState(false);
   const [executionTime, setExecutionTime] = useState<number | null>(null);
@@ -83,20 +107,23 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
 
   // Save query on change (debounced)
   useEffect(() => {
-    if (!savedQuery) return;
+    if (!savedQuery || !connectionId) return;
     // Don't save if query hasn't actually changed from saved version
     if (savedQuery.query === query) return;
     
     const timeoutId = setTimeout(() => {
-      updateQuery(queryId, { query });
+      updateQuery(queryId, { query }, connectionId);
       // Update local savedQuery state to prevent unnecessary re-renders
       setSavedQuery((prev) => prev ? { ...prev, query, updatedAt: Date.now() } : prev);
       if (onQueryUpdate) {
         onQueryUpdate(queryId, query);
       }
+      if (onQueryChange) {
+        onQueryChange(query);
+      }
     }, 500);
     return () => clearTimeout(timeoutId);
-  }, [query, queryId, onQueryUpdate, savedQuery]);
+  }, [query, queryId, connectionId, onQueryUpdate, onQueryChange, savedQuery]);
 
   // Detect dark mode
   useEffect(() => {
@@ -122,6 +149,24 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
   const [queryResultSets, setQueryResultSets] = useState<any[][]>([]);
   const [queryError, setQueryError] = useState<Error | null>(null);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
+
+  const generateQueryId = () => {
+    return `query_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  };
+
+  const handleCancel = async () => {
+    if (activeQueryId) {
+      try {
+        await api.cancelQuery(activeQueryId);
+        setActiveQueryId(null);
+        setIsExecuting(false);
+        setQueryError(new Error('Query was cancelled'));
+      } catch (err) {
+        console.error('Failed to cancel query:', err);
+      }
+    }
+  };
   
   // Selection state - one per result set
   const [selections, setSelections] = useState<Map<number, CellSelection | null>>(new Map());
@@ -538,7 +583,8 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
     isRestoringRef.current = true;
     
     // Load query data
-    const queries = getQueries();
+    if (!connectionId) return;
+    const queries = getQueries(connectionId);
     const found = queries.find((q) => q.id === queryId);
     if (found) {
       setSavedQuery(found);
@@ -607,8 +653,12 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
     setQueryResultSets([]);
     setMessages([]); // Reset messages when executing a new query
     
+    const queryId = generateQueryId();
+    setActiveQueryId(queryId);
+    
     try {
-      const result = await api.executeQuery(queryToExecute);
+      const result = await api.executeQuery(queryToExecute, queryId);
+      setActiveQueryId(null);
       const execTime = result.executionTime || 0;
       setExecutionTime(execTime);
       
@@ -824,6 +874,17 @@ export function QueryEditorEnhanced({ queryId, onQueryUpdate }: QueryEditorEnhan
               </>
             )}
           </Button>
+          {isExecuting && activeQueryId && (
+            <Button
+              onClick={handleCancel}
+              variant="destructive"
+              size="sm"
+              className="h-7"
+            >
+              <X className="mr-2 h-3 w-3" />
+              Cancel
+            </Button>
+          )}
           {executionTime !== null && (
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />

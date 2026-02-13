@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api, type Table } from '@/lib/api';
 import { formatName } from '@/lib/nameFormatter';
+import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { Database, Table as TableIcon, ChevronRight, ChevronDown, Search, Star, ChevronUp, X, ChevronLeft, FileText, Plus, Trash2 } from 'lucide-react';
 import { Input } from './ui/input';
 import { cn } from '@/lib/utils';
@@ -15,6 +16,7 @@ interface SidebarProps {
   favoritesUpdated?: number; // Timestamp to trigger refresh
   nameDisplayMode?: 'database-names' | 'friendly-names';
   connected?: boolean;
+  connectionInfo?: ConnectionInfo | null;
   onConnectionLost?: () => void;
 }
 
@@ -34,53 +36,63 @@ interface SavedQuery {
 const FAVORITES_STORAGE_KEY = 'datapeek_favorites';
 const QUERIES_STORAGE_KEY = 'datapeek_queries';
 
-function getFavorites(): FavoriteTable[] {
+function getFavorites(connectionId: string | null): FavoriteTable[] {
+  if (!connectionId) return [];
   try {
-    const stored = localStorage.getItem(FAVORITES_STORAGE_KEY);
+    const key = getConnectionKey(FAVORITES_STORAGE_KEY, connectionId);
+    const stored = localStorage.getItem(key);
     return stored ? JSON.parse(stored) : [];
   } catch {
     return [];
   }
 }
 
-function saveFavorites(favorites: FavoriteTable[]) {
-  localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
+function saveFavorites(favorites: FavoriteTable[], connectionId: string | null) {
+  if (!connectionId) return;
+  const key = getConnectionKey(FAVORITES_STORAGE_KEY, connectionId);
+  localStorage.setItem(key, JSON.stringify(favorites));
 }
 
 function isFavorite(schema: string, table: string, favorites: FavoriteTable[]): boolean {
   return favorites.some((f) => f.schema === schema && f.table === table);
 }
 
-function getQueries(): SavedQuery[] {
+function getQueries(connectionId: string | null): SavedQuery[] {
+  if (!connectionId) return [];
   try {
-    const stored = localStorage.getItem(QUERIES_STORAGE_KEY);
+    const key = getConnectionKey(QUERIES_STORAGE_KEY, connectionId);
+    const stored = localStorage.getItem(key);
     return stored ? JSON.parse(stored) : [];
   } catch {
     return [];
   }
 }
 
-function saveQueries(queries: SavedQuery[]) {
-  localStorage.setItem(QUERIES_STORAGE_KEY, JSON.stringify(queries));
+function saveQueries(queries: SavedQuery[], connectionId: string | null) {
+  if (!connectionId) return;
+  const key = getConnectionKey(QUERIES_STORAGE_KEY, connectionId);
+  localStorage.setItem(key, JSON.stringify(queries));
 }
 
-function deleteQuery(queryId: string): boolean {
+function deleteQuery(queryId: string, connectionId: string | null): boolean {
+  if (!connectionId) return false;
   try {
-    const queries = getQueries();
+    const queries = getQueries(connectionId);
     const filtered = queries.filter(q => q.id !== queryId);
     if (filtered.length === queries.length) {
       return false; // Query not found
     }
-    saveQueries(filtered);
+    saveQueries(filtered, connectionId);
     return true;
   } catch {
     return false;
   }
 }
 
-function renameQuery(queryId: string, newName: string): boolean {
+function renameQuery(queryId: string, newName: string, connectionId: string | null): boolean {
+  if (!connectionId) return false;
   try {
-    const queries = getQueries();
+    const queries = getQueries(connectionId);
     const index = queries.findIndex(q => q.id === queryId);
     if (index === -1) {
       return false; // Query not found
@@ -92,7 +104,7 @@ function renameQuery(queryId: string, newName: string): boolean {
       name: finalName,
       updatedAt: Date.now(),
     };
-    saveQueries(queries);
+    saveQueries(queries, connectionId);
     return true;
   } catch {
     return false;
@@ -104,8 +116,9 @@ function getDisplayName(queryName: string): string {
   return queryName.endsWith('.sql') ? queryName.slice(0, -4) : queryName;
 }
 
-function createNewQuery(): SavedQuery {
-  const queries = getQueries();
+function createNewQuery(connectionId: string | null): SavedQuery | null {
+  if (!connectionId) return null;
+  const queries = getQueries(connectionId);
   const existingNumbers = queries
     .map((q) => {
       const match = q.name.match(/Query(\d+)\.sql/);
@@ -123,7 +136,7 @@ function createNewQuery(): SavedQuery {
   };
   
   const updatedQueries = [...queries, newQuery];
-  saveQueries(updatedQueries);
+  saveQueries(updatedQueries, connectionId);
   return newQuery;
 }
 
@@ -136,12 +149,20 @@ export function Sidebar({
   favoritesUpdated,
   nameDisplayMode = 'database-names',
   connected = false,
+  connectionInfo,
   onConnectionLost,
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set(['Favorites', 'Queries']));
-  const [favorites, setFavorites] = useState<FavoriteTable[]>(getFavorites());
-  const [queries, setQueries] = useState<SavedQuery[]>(getQueries());
+  const connectionId = connectionInfo?.connectionId || null;
+  const [favorites, setFavorites] = useState<FavoriteTable[]>(getFavorites(connectionId));
+  const [queries, setQueries] = useState<SavedQuery[]>(getQueries(connectionId));
+
+  // Reload favorites and queries when connection changes
+  useEffect(() => {
+    setFavorites(getFavorites(connectionId));
+    setQueries(getQueries(connectionId));
+  }, [connectionId]);
 
   const { data: tables = [], isLoading, error } = useQuery<Table[]>({
     queryKey: ['tables'],
@@ -254,6 +275,7 @@ export function Sidebar({
 
   const toggleFavorite = useCallback((schema: string, table: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (!connectionId) return;
     const newFavorites = [...favorites];
     const index = newFavorites.findIndex((f) => f.schema === schema && f.table === table);
     
@@ -264,19 +286,20 @@ export function Sidebar({
     }
     
     setFavorites(newFavorites);
-    saveFavorites(newFavorites);
-  }, [favorites]);
+    saveFavorites(newFavorites, connectionId);
+  }, [favorites, connectionId]);
 
   const moveFavorite = useCallback((index: number, direction: 'up' | 'down') => {
+    if (!connectionId) return;
     const newFavorites = [...favorites];
     const newIndex = direction === 'up' ? index - 1 : index + 1;
     
     if (newIndex >= 0 && newIndex < newFavorites.length) {
       [newFavorites[index], newFavorites[newIndex]] = [newFavorites[newIndex], newFavorites[index]];
       setFavorites(newFavorites);
-      saveFavorites(newFavorites);
+      saveFavorites(newFavorites, connectionId);
     }
-  }, [favorites]);
+  }, [favorites, connectionId]);
 
   // Get favorite tables with full table info
   const favoriteTables = favorites
@@ -411,14 +434,17 @@ export function Sidebar({
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    const newQuery = createNewQuery();
-                    setQueries(getQueries());
-                    if (onQuerySelect) {
-                      onQuerySelect(newQuery.id);
+                    const newQuery = createNewQuery(connectionId);
+                    if (newQuery) {
+                      setQueries(getQueries(connectionId));
+                      if (onQuerySelect) {
+                        onQuerySelect(newQuery.id);
+                      }
                     }
                   }}
                   className="p-1 rounded hover:bg-accent transition-colors"
                   title="New Query"
+                  disabled={!connectionId}
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </button>
@@ -452,8 +478,8 @@ export function Sidebar({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (deleteQuery(query.id)) {
-                              setQueries(getQueries());
+                            if (deleteQuery(query.id, connectionId)) {
+                              setQueries(getQueries(connectionId));
                               if (isSelected && onQuerySelect) {
                                 onQuerySelect(undefined);
                               }

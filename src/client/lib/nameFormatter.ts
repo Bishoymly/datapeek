@@ -23,14 +23,26 @@ export function toFriendlyName(name: string): string {
   return friendly;
 }
 
+import { getConnectionKey } from './connectionState';
+
 /**
  * Gets the name display mode preference from localStorage
  */
-export function getNameDisplayMode(): 'database-names' | 'friendly-names' {
+export function getNameDisplayMode(connectionId: string | null = null): 'database-names' | 'friendly-names' {
   try {
-    const saved = localStorage.getItem('datapeek_name_display_mode');
+    const key = connectionId 
+      ? getConnectionKey('datapeek_name_display_mode', connectionId)
+      : 'datapeek_name_display_mode'; // Fallback to global for backward compatibility
+    const saved = localStorage.getItem(key);
     if (saved === 'database-names' || saved === 'friendly-names') {
       return saved;
+    }
+    // If no connection-specific setting, check global for backward compatibility
+    if (connectionId) {
+      const globalSaved = localStorage.getItem('datapeek_name_display_mode');
+      if (globalSaved === 'database-names' || globalSaved === 'friendly-names') {
+        return globalSaved;
+      }
     }
   } catch {
     // Ignore storage errors
@@ -41,9 +53,15 @@ export function getNameDisplayMode(): 'database-names' | 'friendly-names' {
 /**
  * Saves the name display mode preference to localStorage
  */
-export function saveNameDisplayMode(mode: 'database-names' | 'friendly-names'): void {
+export function saveNameDisplayMode(mode: 'database-names' | 'friendly-names', connectionId: string | null = null): void {
   try {
-    localStorage.setItem('datapeek_name_display_mode', mode);
+    if (connectionId) {
+      const key = getConnectionKey('datapeek_name_display_mode', connectionId);
+      localStorage.setItem(key, mode);
+    } else {
+      // Fallback to global for backward compatibility
+      localStorage.setItem('datapeek_name_display_mode', mode);
+    }
   } catch {
     // Ignore storage errors
   }

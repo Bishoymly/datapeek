@@ -2,8 +2,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
 import { Button } from './ui/button';
-import { Play, Loader2, History } from 'lucide-react';
+import { Play, Loader2, History, X } from 'lucide-react';
 import { api } from '@/lib/api';
+import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { cn } from '@/lib/utils';
 
 const QUERY_HISTORY_KEY = 'datapeek_query_history';
@@ -11,6 +12,7 @@ const MAX_HISTORY = 20;
 
 interface QueryEditorProps {
   initialQuery?: string;
+  connectionInfo?: ConnectionInfo | null;
 }
 
 interface CellSelection {
@@ -21,7 +23,8 @@ interface CellSelection {
   selectionType?: 'cell' | 'row' | 'column';
 }
 
-export function QueryEditor({ initialQuery }: QueryEditorProps) {
+export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) {
+  const connectionId = connectionInfo?.connectionId || null;
   const [query, setQuery] = useState(initialQuery || 'SELECT TOP 100 * FROM ');
   const [lastInitialQuery, setLastInitialQuery] = useState<string>('');
   
@@ -36,10 +39,30 @@ export function QueryEditor({ initialQuery }: QueryEditorProps) {
       setLastInitialQuery('');
     }
   }, [initialQuery, lastInitialQuery]);
-  const [history, setHistory] = useState<string[]>(() => {
-    const stored = localStorage.getItem(QUERY_HISTORY_KEY);
-    return stored ? JSON.parse(stored) : [];
-  });
+  
+  const getHistory = useCallback((): string[] => {
+    if (!connectionId) return [];
+    try {
+      const key = getConnectionKey(QUERY_HISTORY_KEY, connectionId);
+      const stored = localStorage.getItem(key);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  }, [connectionId]);
+  
+  const saveHistory = useCallback((history: string[]) => {
+    if (!connectionId) return;
+    const key = getConnectionKey(QUERY_HISTORY_KEY, connectionId);
+    localStorage.setItem(key, JSON.stringify(history));
+  }, [connectionId]);
+  
+  const [history, setHistory] = useState<string[]>(getHistory);
+  
+  // Reload history when connection changes
+  useEffect(() => {
+    setHistory(getHistory());
+  }, [connectionId, getHistory]);
   const [showHistory, setShowHistory] = useState(false);
   const [isDark, setIsDark] = useState(false);
   
@@ -70,12 +93,40 @@ export function QueryEditor({ initialQuery }: QueryEditorProps) {
   }, []);
 
   const [executionQuery, setExecutionQuery] = useState<string>('');
+  const [activeQueryId, setActiveQueryId] = useState<string | null>(null);
+
+  const generateQueryId = () => {
+    return `query_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  };
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['query', executionQuery],
-    queryFn: () => api.executeQuery(executionQuery),
+    queryKey: ['query', executionQuery, activeQueryId],
+    queryFn: async () => {
+      const queryId = generateQueryId();
+      setActiveQueryId(queryId);
+      try {
+        const result = await api.executeQuery(executionQuery, queryId);
+        setActiveQueryId(null);
+        return result;
+      } catch (err: any) {
+        setActiveQueryId(null);
+        throw err;
+      }
+    },
     enabled: !!executionQuery.trim(), // Only execute when we have a query
+    retry: false, // Don't retry cancelled queries
   });
+
+  const handleCancel = async () => {
+    if (activeQueryId) {
+      try {
+        await api.cancelQuery(activeQueryId);
+        setActiveQueryId(null);
+      } catch (err) {
+        console.error('Failed to cancel query:', err);
+      }
+    }
+  };
 
   // Store column keys from successful queries or column metadata
   useEffect(() => {
@@ -124,7 +175,7 @@ export function QueryEditor({ initialQuery }: QueryEditorProps) {
       ...history.filter((h) => h !== queryToExecute.trim()),
     ].slice(0, MAX_HISTORY);
     setHistory(newHistory);
-    localStorage.setItem(QUERY_HISTORY_KEY, JSON.stringify(newHistory));
+    saveHistory(newHistory);
     
     // Clear grid selection when executing new query
     setSelection(null);
@@ -429,6 +480,17 @@ export function QueryEditor({ initialQuery }: QueryEditorProps) {
               </>
             )}
           </Button>
+          {isLoading && activeQueryId && (
+            <Button
+              onClick={handleCancel}
+              variant="destructive"
+              size="sm"
+              className="h-7"
+            >
+              <X className="mr-2 h-3 w-3" />
+              Cancel
+            </Button>
+          )}
           <div className="relative">
             <Button
               variant="outline"

@@ -5,8 +5,9 @@ import { Sidebar } from './components/Sidebar';
 import { DataGrid } from './components/DataGrid';
 import { QueryEditor } from './components/QueryEditor';
 import { QueryEditorEnhanced } from './components/QueryEditorEnhanced';
-import { api } from './lib/api';
+import { api, type ConnectionConfig } from './lib/api';
 import { getNameDisplayMode, saveNameDisplayMode, formatName } from './lib/nameFormatter';
+import { getConnectionId, getConnectionKey, type ConnectionInfo } from './lib/connectionState';
 import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from './components/ui/button';
@@ -33,6 +34,7 @@ function AppContent() {
   const [showConnectionDialog, setShowConnectionDialog] = useState(false);
   const [isAutoConnecting, setIsAutoConnecting] = useState(true); // Start with connecting state
   const [databaseName, setDatabaseName] = useState<string>('');
+  const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
   const [selectedTable, setSelectedTable] = useState<{ schema: string; table: string } | undefined>();
   const [selectedQuery, setSelectedQuery] = useState<string | undefined>();
   const [view, setView] = useState<'table' | 'query'>('table');
@@ -42,13 +44,22 @@ function AppContent() {
   const [editingQueryNameValue, setEditingQueryNameValue] = useState<string>('');
   const queryNameInputRef = useRef<HTMLInputElement>(null);
   const [favoritesUpdated, setFavoritesUpdated] = useState<number>(0);
-  const [nameDisplayMode, setNameDisplayMode] = useState<'database-names' | 'friendly-names'>(() => getNameDisplayMode());
+  const [nameDisplayMode, setNameDisplayMode] = useState<'database-names' | 'friendly-names'>(() => getNameDisplayMode(null));
+  
+  // Update name display mode when connection changes
+  useEffect(() => {
+    if (connectionInfo) {
+      setNameDisplayMode(getNameDisplayMode(connectionInfo.connectionId));
+    }
+  }, [connectionInfo]);
 
   // Get query name for display (without .sql extension)
   const getQueryName = (queryId: string | undefined): string | undefined => {
-    if (!queryId) return undefined;
+    if (!queryId || !connectionInfo) return undefined;
     try {
-      const stored = localStorage.getItem('datapeek_queries');
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_queries', connectionId);
+      const stored = localStorage.getItem(key);
       if (stored) {
         const queries = JSON.parse(stored);
         const query = queries.find((q: any) => q.id === queryId);
@@ -64,10 +75,12 @@ function AppContent() {
 
   // Create a new query from SQL and switch to it
   const handleCreateQueryFromGrid = (sqlQuery: string) => {
-    if (!selectedTable) return;
+    if (!selectedTable || !connectionInfo) return;
     
     try {
-      const stored = localStorage.getItem('datapeek_queries');
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_queries', connectionId);
+      const stored = localStorage.getItem(key);
       const queries = stored ? JSON.parse(stored) : [];
       
       // Generate base name from table (schema.table)
@@ -102,7 +115,7 @@ function AppContent() {
       };
       
       const updatedQueries = [...queries, newQuery];
-      localStorage.setItem('datapeek_queries', JSON.stringify(updatedQueries));
+      localStorage.setItem(key, JSON.stringify(updatedQueries));
       
       // Notify Sidebar to refresh queries list
       setQueriesUpdated(Date.now());
@@ -120,9 +133,11 @@ function AppContent() {
 
   // Get full query name (with .sql) for renaming
   const getFullQueryName = (queryId: string | undefined): string | undefined => {
-    if (!queryId) return undefined;
+    if (!queryId || !connectionInfo) return undefined;
     try {
-      const stored = localStorage.getItem('datapeek_queries');
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_queries', connectionId);
+      const stored = localStorage.getItem(key);
       if (stored) {
         const queries = JSON.parse(stored);
         const query = queries.find((q: any) => q.id === queryId);
@@ -144,8 +159,11 @@ function AppContent() {
 
   // Rename query function
   const renameQuery = (queryId: string, newName: string): boolean => {
+    if (!connectionInfo) return false;
     try {
-      const stored = localStorage.getItem('datapeek_queries');
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_queries', connectionId);
+      const stored = localStorage.getItem(key);
       if (!stored) return false;
       const queries = JSON.parse(stored);
       const index = queries.findIndex((q: any) => q.id === queryId);
@@ -158,7 +176,7 @@ function AppContent() {
         name: finalName,
         updatedAt: Date.now(),
       };
-      localStorage.setItem('datapeek_queries', JSON.stringify(queries));
+      localStorage.setItem(key, JSON.stringify(queries));
       setQueriesUpdated(Date.now());
       return true;
     } catch {
@@ -218,15 +236,18 @@ function AppContent() {
 
   // Delete query function
   const deleteQuery = (queryId: string): boolean => {
+    if (!connectionInfo) return false;
     try {
-      const stored = localStorage.getItem('datapeek_queries');
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_queries', connectionId);
+      const stored = localStorage.getItem(key);
       if (!stored) return false;
       const queries = JSON.parse(stored);
       const filtered = queries.filter((q: any) => q.id !== queryId);
       if (filtered.length === queries.length) {
         return false; // Query not found
       }
-      localStorage.setItem('datapeek_queries', JSON.stringify(filtered));
+      localStorage.setItem(key, JSON.stringify(filtered));
       setQueriesUpdated(Date.now());
       return true;
     } catch {
@@ -250,8 +271,11 @@ function AppContent() {
 
   // Favorite functions
   const getFavorites = (): Array<{ schema: string; table: string }> => {
+    if (!connectionInfo) return [];
     try {
-      const stored = localStorage.getItem('datapeek_favorites');
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_favorites', connectionId);
+      const stored = localStorage.getItem(key);
       return stored ? JSON.parse(stored) : [];
     } catch {
       return [];
@@ -259,7 +283,10 @@ function AppContent() {
   };
 
   const saveFavorites = (favorites: Array<{ schema: string; table: string }>) => {
-    localStorage.setItem('datapeek_favorites', JSON.stringify(favorites));
+    if (!connectionInfo) return;
+    const connectionId = connectionInfo.connectionId;
+    const key = getConnectionKey('datapeek_favorites', connectionId);
+    localStorage.setItem(key, JSON.stringify(favorites));
     setFavoritesUpdated(Date.now());
   };
 
@@ -315,6 +342,8 @@ function AppContent() {
           setDatabaseName('');
         }
       } else {
+        // Connection lost - clear connection info
+        setConnectionInfo(null);
         // Keep current UI (including sidebar errors) and prompt reconnect.
         setShowConnectionDialog(true);
       }
@@ -341,6 +370,27 @@ function AppContent() {
         setConnected(true);
         setShowConnectionDialog(false);
         setIsAutoConnecting(false);
+        // Try to restore connection info from recent connections
+        const recentConnections = localStorage.getItem('datapeek_recent_connections');
+        if (recentConnections) {
+          try {
+            const recent = JSON.parse(recentConnections);
+            if (recent.length > 0) {
+              const lastConnection = recent[0];
+              const connectionId = getConnectionId(lastConnection);
+              if (connectionId && status.databaseName === lastConnection.database) {
+                setConnectionInfo({
+                  server: lastConnection.server,
+                  database: lastConnection.database,
+                  dbType: lastConnection.dbType || 'mssql',
+                  connectionId,
+                });
+              }
+            }
+          } catch (e) {
+            // Ignore parse errors
+          }
+        }
       } else {
         // Check for provided connection string
         console.log('Not connected, checking for provided connection string...');
@@ -424,6 +474,16 @@ function AppContent() {
           console.log('Connected successfully!');
           setConnected(true);
           setIsAutoConnecting(false);
+          // Store connection info
+          const connectionId = getConnectionId(config);
+          if (connectionId) {
+            setConnectionInfo({
+              server: config.server,
+              database: config.database,
+              dbType: config.dbType || 'mssql',
+              connectionId,
+            });
+          }
         } else {
           throw new Error(result.message || 'Connection failed');
         }
@@ -441,10 +501,22 @@ function AppContent() {
     }
   }
 
-  function handleConnect() {
+  function handleConnect(config?: ConnectionConfig) {
     setConnected(true);
     setShowConnectionDialog(false);
     setIsAutoConnecting(false);
+    // Store connection info if config provided
+    if (config) {
+      const connectionId = getConnectionId(config);
+      if (connectionId) {
+        setConnectionInfo({
+          server: config.server,
+          database: config.database,
+          dbType: config.dbType || 'mssql',
+          connectionId,
+        });
+      }
+    }
   }
 
   function handleConnectionError() {
@@ -457,7 +529,9 @@ function AppContent() {
     try {
       await api.disconnect();
       setConnected(false);
+      setConnectionInfo(null);
       setSelectedTable(undefined);
+      setSelectedQuery(undefined);
       setShowConnectionDialog(true);
     } catch (error) {
       console.error('Disconnect error:', error);
@@ -502,7 +576,7 @@ function AppContent() {
                   <DropdownMenuItem
                     onClick={() => {
                       setNameDisplayMode('database-names');
-                      saveNameDisplayMode('database-names');
+                      saveNameDisplayMode('database-names', connectionInfo?.connectionId || null);
                     }}
                     className={nameDisplayMode === 'database-names' ? 'bg-accent' : ''}
                   >
@@ -511,7 +585,7 @@ function AppContent() {
                   <DropdownMenuItem
                     onClick={() => {
                       setNameDisplayMode('friendly-names');
-                      saveNameDisplayMode('friendly-names');
+                      saveNameDisplayMode('friendly-names', connectionInfo?.connectionId || null);
                     }}
                     className={nameDisplayMode === 'friendly-names' ? 'bg-accent' : ''}
                   >
@@ -585,6 +659,7 @@ function AppContent() {
               favoritesUpdated={favoritesUpdated}
               nameDisplayMode={nameDisplayMode}
               connected={connected}
+              connectionInfo={connectionInfo}
               onConnectionLost={() => {
                 setShowConnectionDialog(true);
               }}
@@ -711,6 +786,7 @@ function AppContent() {
                   <DataGrid 
                     schema={selectedTable.schema} 
                     table={selectedTable.table}
+                    connectionInfo={connectionInfo}
                     onQueryChange={setTableQuery}
                     onCreateQuery={handleCreateQueryFromGrid}
                     nameDisplayMode={nameDisplayMode}
@@ -721,9 +797,9 @@ function AppContent() {
                   </div>
                 )
               ) : selectedQuery ? (
-                <QueryEditorEnhanced queryId={selectedQuery} />
+                <QueryEditorEnhanced queryId={selectedQuery} connectionInfo={connectionInfo} />
               ) : (
-                <QueryEditor initialQuery={tableQuery || undefined} />
+                <QueryEditor initialQuery={tableQuery || undefined} connectionInfo={connectionInfo} />
               )}
             </div>
           </div>
@@ -748,7 +824,9 @@ function AppContent() {
       {/* Connection Dialog */}
       <ConnectionDialog
         open={showConnectionDialog && !isAutoConnecting}
-        onConnect={handleConnect}
+        onConnect={(config) => {
+          handleConnect(config);
+        }}
         onError={handleConnectionError}
       />
     </div>
