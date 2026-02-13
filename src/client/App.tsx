@@ -5,10 +5,10 @@ import { Sidebar } from './components/Sidebar';
 import { DataGrid } from './components/DataGrid';
 import { QueryEditor } from './components/QueryEditor';
 import { QueryEditorEnhanced } from './components/QueryEditorEnhanced';
-import { api, type ConnectionConfig } from './lib/api';
+import { api, type ConnectionConfig, type Filter } from './lib/api';
 import { getNameDisplayMode, saveNameDisplayMode, formatName } from './lib/nameFormatter';
 import { getConnectionId, getConnectionKey, type ConnectionInfo } from './lib/connectionState';
-import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag } from 'lucide-react';
+import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag, Link2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from './components/ui/button';
 import { ThemeToggle } from './components/ThemeToggle';
@@ -19,6 +19,14 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from './components/ui/dropdown-menu';
+
+interface TableTab {
+  id: string;
+  schema: string;
+  table: string;
+  filters?: Filter[];
+  title?: string;
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,10 +43,11 @@ function AppContent() {
   const [isAutoConnecting, setIsAutoConnecting] = useState(true); // Start with connecting state
   const [databaseName, setDatabaseName] = useState<string>('');
   const [connectionInfo, setConnectionInfo] = useState<ConnectionInfo | null>(null);
-  const [selectedTable, setSelectedTable] = useState<{ schema: string; table: string } | undefined>();
+  const [tableTabs, setTableTabs] = useState<TableTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | undefined>();
   const [selectedQuery, setSelectedQuery] = useState<string | undefined>();
   const [view, setView] = useState<'table' | 'query'>('table');
-  const [tableQuery, setTableQuery] = useState<string>('');
+  const [tableQueries, setTableQueries] = useState<Record<string, string>>({});
   const [queriesUpdated, setQueriesUpdated] = useState<number>(0);
   const [editingQueryName, setEditingQueryName] = useState(false);
   const [editingQueryNameValue, setEditingQueryNameValue] = useState<string>('');
@@ -46,10 +55,43 @@ function AppContent() {
   const [favoritesUpdated, setFavoritesUpdated] = useState<number>(0);
   const [nameDisplayMode, setNameDisplayMode] = useState<'database-names' | 'friendly-names'>(() => getNameDisplayMode(null));
   
+  // Global FK display mode (not per-table)
+  const getGlobalFkDisplayMode = (): 'key-only' | 'key-display' | 'display-only' => {
+    if (!connectionInfo?.connectionId) return 'key-display';
+    try {
+      const baseKey = 'datapeek_fk_display_mode_global';
+      const key = getConnectionKey(baseKey, connectionInfo.connectionId);
+      const saved = localStorage.getItem(key);
+      if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
+        return saved;
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    return 'key-display'; // Default to 'key-display'
+  };
+
+  const saveGlobalFkDisplayMode = (mode: 'key-only' | 'key-display' | 'display-only') => {
+    if (!connectionInfo?.connectionId) return;
+    try {
+      const baseKey = 'datapeek_fk_display_mode_global';
+      const key = getConnectionKey(baseKey, connectionInfo.connectionId);
+      localStorage.setItem(key, mode);
+    } catch {
+      // Ignore storage errors
+    }
+  };
+
+  const [fkDisplayMode, setFkDisplayMode] = useState<'key-only' | 'key-display' | 'display-only'>(() => getGlobalFkDisplayMode());
+  
+  // Legacy selectedTable for backward compatibility with Sidebar
+  const selectedTable = activeTabId ? tableTabs.find(t => t.id === activeTabId) : undefined;
+  
   // Update name display mode when connection changes
   useEffect(() => {
     if (connectionInfo) {
       setNameDisplayMode(getNameDisplayMode(connectionInfo.connectionId));
+      setFkDisplayMode(getGlobalFkDisplayMode());
     }
   }, [connectionInfo]);
 
@@ -73,9 +115,53 @@ function AppContent() {
     return undefined;
   };
 
+  // Tab management functions
+  const openTableTab = (schema: string, table: string, filters?: Filter[], title?: string) => {
+    const tabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const newTab: TableTab = {
+      id: tabId,
+      schema,
+      table,
+      filters,
+      title,
+    };
+    setTableTabs(prev => [...prev, newTab]);
+    setActiveTabId(tabId);
+    setView('table');
+    setSelectedQuery(undefined);
+  };
+
+  const closeTableTab = (tabId: string) => {
+    setTableTabs(prev => {
+      const newTabs = prev.filter(t => t.id !== tabId);
+      if (activeTabId === tabId) {
+        // If closing active tab, switch to another tab or clear
+        if (newTabs.length > 0) {
+          setActiveTabId(newTabs[newTabs.length - 1].id);
+        } else {
+          setActiveTabId(undefined);
+        }
+      }
+      return newTabs;
+    });
+    // Clean up query state for this tab
+    setTableQueries(prev => {
+      const newQueries = { ...prev };
+      delete newQueries[tabId];
+      return newQueries;
+    });
+  };
+
+  const updateTabFilters = (tabId: string, filters: Filter[]) => {
+    setTableTabs(prev => prev.map(tab => 
+      tab.id === tabId ? { ...tab, filters } : tab
+    ));
+  };
+
   // Create a new query from SQL and switch to it
   const handleCreateQueryFromGrid = (sqlQuery: string) => {
-    if (!selectedTable || !connectionInfo) return;
+    const currentTab = activeTabId ? tableTabs.find(t => t.id === activeTabId) : undefined;
+    if (!currentTab || !connectionInfo) return;
     
     try {
       const connectionId = connectionInfo.connectionId;
@@ -84,7 +170,7 @@ function AppContent() {
       const queries = stored ? JSON.parse(stored) : [];
       
       // Generate base name from table (schema.table)
-      const baseName = `${selectedTable.schema}.${selectedTable.table}`;
+      const baseName = `${currentTab.schema}.${currentTab.table}`;
       
       // Check if a query with this name already exists
       const existingWithSameName = queries.filter((q: any) => q.name.startsWith(baseName));
@@ -122,7 +208,7 @@ function AppContent() {
       
       // Switch to the new query
       setSelectedQuery(newQuery.id);
-      setSelectedTable(undefined);
+      setActiveTabId(undefined);
       setView('query');
     } catch (error) {
       console.error('Failed to create query:', error);
@@ -223,10 +309,12 @@ function AppContent() {
     }
   };
 
-  // Reset table query when table changes
+  // Reset table query when active tab changes
   useEffect(() => {
-    setTableQuery('');
-  }, [selectedTable]);
+    if (activeTabId && !tableQueries[activeTabId]) {
+      setTableQueries(prev => ({ ...prev, [activeTabId]: '' }));
+    }
+  }, [activeTabId]);
 
   // Reset editing state when query changes
   useEffect(() => {
@@ -283,11 +371,18 @@ function AppContent() {
   };
 
   const saveFavorites = (favorites: Array<{ schema: string; table: string }>) => {
-    if (!connectionInfo) return;
-    const connectionId = connectionInfo.connectionId;
-    const key = getConnectionKey('datapeek_favorites', connectionId);
-    localStorage.setItem(key, JSON.stringify(favorites));
-    setFavoritesUpdated(Date.now());
+    if (!connectionInfo) {
+      console.warn('Cannot save favorites: no connection info');
+      return;
+    }
+    try {
+      const connectionId = connectionInfo.connectionId;
+      const key = getConnectionKey('datapeek_favorites', connectionId);
+      localStorage.setItem(key, JSON.stringify(favorites));
+      setFavoritesUpdated(Date.now());
+    } catch (error) {
+      console.error('Failed to save favorites:', error);
+    }
   };
 
   const isFavorite = (schema: string, table: string): boolean => {
@@ -296,24 +391,36 @@ function AppContent() {
   };
 
   const toggleFavorite = () => {
-    if (!selectedTable) return;
+    // Use selectedTable directly since the button is only shown when selectedTable exists
+    if (!selectedTable) {
+      console.warn('No selected table to favorite');
+      return;
+    }
+    if (!connectionInfo) {
+      console.warn('No connection info available');
+      return;
+    }
     const favorites = getFavorites();
     const index = favorites.findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table);
     
     if (index >= 0) {
       // Remove from favorites
       favorites.splice(index, 1);
+      console.log('Removed from favorites:', selectedTable.schema, selectedTable.table);
     } else {
       // Add to favorites
       favorites.push({ schema: selectedTable.schema, table: selectedTable.table });
+      console.log('Added to favorites:', selectedTable.schema, selectedTable.table);
     }
+    console.log('Saving favorites:', favorites);
     saveFavorites(favorites);
   };
 
   const moveFavorite = (direction: 'up' | 'down') => {
-    if (!selectedTable) return;
+    const currentTab = activeTabId ? tableTabs.find(t => t.id === activeTabId) : undefined;
+    if (!currentTab) return;
     const favorites = getFavorites();
-    const index = favorites.findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table);
+    const index = favorites.findIndex((f) => f.schema === currentTab.schema && f.table === currentTab.table);
     
     if (index < 0) return; // Not in favorites
     
@@ -420,40 +527,75 @@ function AppContent() {
 
   async function autoConnect(connectionString: string) {
     try {
-      // Parse connection string (simplified version - ConnectionDialog has full parser)
-      const parts = connectionString.split(';');
-      const config: any = {
-        server: '',
-        database: '',
-        port: 1433,
-        options: { encrypt: true, trustServerCertificate: false },
-      };
-
-      for (const part of parts) {
-        const [key, ...valueParts] = part.split('=');
-        const value = valueParts.join('=').trim();
-        const keyLower = key.trim().toLowerCase();
-
-        if (keyLower === 'server' || keyLower === 'data source') {
-          let serverValue = value;
-          if (serverValue.startsWith('tcp:')) {
-            serverValue = serverValue.substring(4);
+      // Detect database type from connection string
+      const trimmed = connectionString.trim();
+      const isPostgres = trimmed.startsWith('postgresql://') || trimmed.startsWith('postgres://');
+      
+      let config: any;
+      
+      if (isPostgres) {
+        // Parse PostgreSQL URI format: postgresql://user:pass@host:port/db?sslmode=...
+        try {
+          const url = new URL(connectionString);
+          config = {
+            server: url.hostname,
+            database: url.pathname.slice(1), // Remove leading /
+            user: url.username || undefined,
+            password: url.password || undefined,
+            port: url.port ? parseInt(url.port, 10) : 5432,
+            dbType: 'postgres',
+            options: {
+              ssl: false,
+            },
+          };
+          
+          // Parse SSL mode from query params
+          const sslModeParam = url.searchParams.get('sslmode');
+          if (sslModeParam === 'require' || sslModeParam === 'prefer') {
+            config.options.ssl = true;
+          } else if (sslModeParam === 'disable') {
+            config.options.ssl = false;
           }
-          const [serverHost, serverPort] = serverValue.split(',');
-          config.server = serverHost.trim();
-          if (serverPort) {
-            config.port = parseInt(serverPort.trim(), 10);
+        } catch (error) {
+          throw new Error(`Invalid PostgreSQL connection string: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        }
+      } else {
+        // Parse SQL Server format: Server=host;Database=db;User Id=user;Password=pass;...
+        const parts = connectionString.split(';');
+        config = {
+          server: '',
+          database: '',
+          port: 1433,
+          dbType: 'mssql',
+          options: { encrypt: true, trustServerCertificate: false },
+        };
+
+        for (const part of parts) {
+          const [key, ...valueParts] = part.split('=');
+          const value = valueParts.join('=').trim();
+          const keyLower = key.trim().toLowerCase();
+
+          if (keyLower === 'server' || keyLower === 'data source') {
+            let serverValue = value;
+            if (serverValue.startsWith('tcp:')) {
+              serverValue = serverValue.substring(4);
+            }
+            const [serverHost, serverPort] = serverValue.split(',');
+            config.server = serverHost.trim();
+            if (serverPort) {
+              config.port = parseInt(serverPort.trim(), 10);
+            }
+          } else if (keyLower === 'database' || keyLower === 'initial catalog') {
+            config.database = value;
+          } else if (keyLower === 'user id' || keyLower === 'userid' || keyLower === 'uid') {
+            config.user = value;
+          } else if (keyLower === 'password' || keyLower === 'pwd') {
+            config.password = value;
+          } else if (keyLower === 'encrypt') {
+            config.options.encrypt = value.toLowerCase() === 'true';
+          } else if (keyLower === 'trustservercertificate' || keyLower === 'trust server certificate') {
+            config.options.trustServerCertificate = value.toLowerCase() === 'true';
           }
-        } else if (keyLower === 'database' || keyLower === 'initial catalog') {
-          config.database = value;
-        } else if (keyLower === 'user id' || keyLower === 'userid' || keyLower === 'uid') {
-          config.user = value;
-        } else if (keyLower === 'password' || keyLower === 'pwd') {
-          config.password = value;
-        } else if (keyLower === 'encrypt') {
-          config.options.encrypt = value.toLowerCase() === 'true';
-        } else if (keyLower === 'trustservercertificate' || keyLower === 'trust server certificate') {
-          config.options.trustServerCertificate = value.toLowerCase() === 'true';
         }
       }
 
@@ -461,9 +603,11 @@ function AppContent() {
         server: config.server, 
         database: config.database, 
         port: config.port,
+        dbType: config.dbType,
         hasUser: !!config.user,
         hasPassword: !!config.password,
-        encrypt: config.options.encrypt
+        encrypt: config.options?.encrypt,
+        ssl: config.options?.ssl
       });
 
       if (config.server && config.database) {
@@ -530,8 +674,10 @@ function AppContent() {
       await api.disconnect();
       setConnected(false);
       setConnectionInfo(null);
-      setSelectedTable(undefined);
+      setTableTabs([]);
+      setActiveTabId(undefined);
       setSelectedQuery(undefined);
+      setTableQueries({});
       setShowConnectionDialog(true);
     } catch (error) {
       console.error('Disconnect error:', error);
@@ -594,6 +740,50 @@ function AppContent() {
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
+            {connected && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 text-xs"
+                    title="Foreign key display mode"
+                  >
+                    <Link2 className="h-3 w-3 mr-1.5" />
+                    FK: {fkDisplayMode === 'key-only' ? 'Key Only' : fkDisplayMode === 'key-display' ? 'Key - Display' : 'Display Only'}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setFkDisplayMode('key-only');
+                      saveGlobalFkDisplayMode('key-only');
+                    }}
+                    className={fkDisplayMode === 'key-only' ? 'bg-accent' : ''}
+                  >
+                    Key Only
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setFkDisplayMode('key-display');
+                      saveGlobalFkDisplayMode('key-display');
+                    }}
+                    className={fkDisplayMode === 'key-display' ? 'bg-accent' : ''}
+                  >
+                    Key - Display
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() => {
+                      setFkDisplayMode('display-only');
+                      saveGlobalFkDisplayMode('display-only');
+                    }}
+                    className={fkDisplayMode === 'display-only' ? 'bg-accent' : ''}
+                  >
+                    Display Only
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             <ThemeToggle />
             {connected && (
               <DropdownMenu>
@@ -637,20 +827,20 @@ function AppContent() {
           <div className="w-72 flex-shrink-0">
             <Sidebar
               onTableSelect={(schema, table) => {
-                setSelectedTable({ schema, table });
-                setSelectedQuery(undefined);
-                setView('table');
+                setTableTabs([]);
+                setTableQueries({});
+                openTableTab(schema, table);
               }}
               selectedTable={selectedTable}
               onQuerySelect={(queryId) => {
                 if (queryId) {
                   setSelectedQuery(queryId);
-                  setSelectedTable(undefined);
+                  setActiveTabId(undefined);
                   setView('query');
                 } else {
                   // Query was deleted, clear selection
                   setSelectedQuery(undefined);
-                  setSelectedTable(undefined);
+                  setActiveTabId(undefined);
                   setView('table');
                 }
               }}
@@ -724,52 +914,89 @@ function AppContent() {
                   </>
                 )}
               </div>
-            ) : selectedTable ? (
-              <div className="border-b flex items-center justify-between bg-tabs-bg dark:bg-tabs-bg">
-                <div className="flex items-center gap-2 px-4 py-2 border-b-2 border-primary">
-                  <span className="text-sm font-medium">
-                    {formatName(selectedTable.schema, nameDisplayMode)}.{formatName(selectedTable.table, nameDisplayMode)}
-                  </span>
+            ) : tableTabs.length > 0 ? (
+              <div className="border-b flex items-center bg-tabs-bg dark:bg-tabs-bg overflow-x-auto">
+                <div className="flex items-center flex-1 min-w-0">
+                  {tableTabs.map((tab) => {
+                    const isActive = tab.id === activeTabId;
+                    const tabTitle = tab.title || `${formatName(tab.schema, nameDisplayMode)}.${formatName(tab.table, nameDisplayMode)}`;
+                    return (
+                      <div
+                        key={tab.id}
+                        className={cn(
+                          "flex items-center gap-1 px-3 py-2 border-r border-border cursor-pointer group",
+                          isActive 
+                            ? "bg-background -mb-px relative z-10" 
+                            : "border-b border-border bg-muted/50 dark:bg-muted/40"
+                        )}
+                        onClick={() => setActiveTabId(tab.id)}
+                      >
+                        <span className="text-sm font-medium whitespace-nowrap">{tabTitle}</span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeTableTab(tab.id);
+                          }}
+                          className="p-0.5 rounded hover:bg-accent transition-colors opacity-0 group-hover:opacity-100"
+                          title="Close tab"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div className="flex items-center gap-1 px-4 py-2">
-                  <button
-                    onClick={toggleFavorite}
-                    className={cn(
-                      "p-1 rounded hover:bg-accent transition-colors",
-                      isFavorite(selectedTable.schema, selectedTable.table) && "bg-accent"
+                {selectedTable && (
+                  <div className="flex items-center gap-1 px-4 py-2 border-l border-border">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        toggleFavorite();
+                      }}
+                      disabled={!connectionInfo}
+                      className={cn(
+                        "p-1 rounded hover:bg-accent transition-colors",
+                        isFavorite(selectedTable.schema, selectedTable.table) && "bg-accent",
+                        !connectionInfo && "opacity-50 cursor-not-allowed"
+                      )}
+                      title={!connectionInfo 
+                        ? "Connect to database to use favorites" 
+                        : isFavorite(selectedTable.schema, selectedTable.table) 
+                          ? "Remove from favorites" 
+                          : "Add to favorites"}
+                    >
+                      <Star className={cn("h-4 w-4", isFavorite(selectedTable.schema, selectedTable.table) && "fill-yellow-500 text-yellow-500")} />
+                    </button>
+                    {isFavorite(selectedTable.schema, selectedTable.table) && (
+                      <>
+                        <div className="w-px h-4 bg-border mx-1" />
+                        <button
+                          onClick={() => moveFavorite('up')}
+                          disabled={getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === 0}
+                          className={cn(
+                            "p-1 rounded hover:bg-accent transition-colors",
+                            getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === 0 && "opacity-50 cursor-not-allowed"
+                          )}
+                          title="Move Up"
+                        >
+                          <ChevronUp className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => moveFavorite('down')}
+                          disabled={getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === getFavorites().length - 1}
+                          className={cn(
+                            "p-1 rounded hover:bg-accent transition-colors",
+                            getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === getFavorites().length - 1 && "opacity-50 cursor-not-allowed"
+                          )}
+                          title="Move Down"
+                        >
+                          <ChevronDownIcon className="h-4 w-4" />
+                        </button>
+                      </>
                     )}
-                    title={isFavorite(selectedTable.schema, selectedTable.table) ? "Remove from favorites" : "Add to favorites"}
-                  >
-                    <Star className={cn("h-4 w-4", isFavorite(selectedTable.schema, selectedTable.table) && "fill-yellow-500 text-yellow-500")} />
-                  </button>
-                  {isFavorite(selectedTable.schema, selectedTable.table) && (
-                    <>
-                      <div className="w-px h-4 bg-border mx-1" />
-                      <button
-                        onClick={() => moveFavorite('up')}
-                        disabled={getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === 0}
-                        className={cn(
-                          "p-1 rounded hover:bg-accent transition-colors",
-                          getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === 0 && "opacity-50 cursor-not-allowed"
-                        )}
-                        title="Move Up"
-                      >
-                        <ChevronUp className="h-4 w-4" />
-                      </button>
-                      <button
-                        onClick={() => moveFavorite('down')}
-                        disabled={getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === getFavorites().length - 1}
-                        className={cn(
-                          "p-1 rounded hover:bg-accent transition-colors",
-                          getFavorites().findIndex((f) => f.schema === selectedTable.schema && f.table === selectedTable.table) === getFavorites().length - 1 && "opacity-50 cursor-not-allowed"
-                        )}
-                        title="Move Down"
-                      >
-                        <ChevronDownIcon className="h-4 w-4" />
-                      </button>
-                    </>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="border-b flex bg-tabs-bg dark:bg-tabs-bg">
@@ -787,9 +1014,23 @@ function AppContent() {
                     schema={selectedTable.schema} 
                     table={selectedTable.table}
                     connectionInfo={connectionInfo}
-                    onQueryChange={setTableQuery}
+                    onQueryChange={(query) => {
+                      if (activeTabId) {
+                        setTableQueries(prev => ({ ...prev, [activeTabId]: query }));
+                      }
+                    }}
                     onCreateQuery={handleCreateQueryFromGrid}
                     nameDisplayMode={nameDisplayMode}
+                    fkDisplayMode={fkDisplayMode}
+                    initialFilters={selectedTable.filters}
+                    onFiltersChange={(filters) => {
+                      if (activeTabId) {
+                        updateTabFilters(activeTabId, filters);
+                      }
+                    }}
+                    onOpenRelatedTable={(schema, table, filters) => {
+                      openTableTab(schema, table, filters);
+                    }}
                   />
                 ) : (
                   <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
@@ -799,7 +1040,7 @@ function AppContent() {
               ) : selectedQuery ? (
                 <QueryEditorEnhanced queryId={selectedQuery} connectionInfo={connectionInfo} />
               ) : (
-                <QueryEditor initialQuery={tableQuery || undefined} connectionInfo={connectionInfo} />
+                <QueryEditor initialQuery={tableQueries[activeTabId || ''] || undefined} connectionInfo={connectionInfo} />
               )}
             </div>
           </div>

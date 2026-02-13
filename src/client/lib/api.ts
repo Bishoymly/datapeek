@@ -87,12 +87,27 @@ export const api = {
   async getProvidedConnectionString(): Promise<{ connectionString: string | null }> {
     try {
       const res = await fetch(`${API_BASE}/connect/provided`);
+      if (!res.ok) {
+        // If server returns error, try to parse JSON, otherwise return null
+        try {
+          return await res.json();
+        } catch {
+          return { connectionString: null };
+        }
+      }
       return res.json();
     } catch (error) {
       // If server is restarting, retry after a short delay
       await new Promise(resolve => setTimeout(resolve, 500));
       try {
         const res = await fetch(`${API_BASE}/connect/provided`);
+        if (!res.ok) {
+          try {
+            return await res.json();
+          } catch {
+            return { connectionString: null };
+          }
+        }
         return res.json();
       } catch {
         return { connectionString: null };
@@ -101,13 +116,34 @@ export const api = {
   },
 
   async getTables(): Promise<Table[]> {
-    const res = await fetch(`${API_BASE}/tables`);
-    if (!res.ok) {
-      const errorData = await res.json().catch(() => ({ error: 'Failed to fetch tables' }));
-      const errorMsg = errorData.error || `Failed to fetch tables: ${res.status} ${res.statusText}`;
-      throw new Error(errorMsg);
+    // Retry logic for transient connection issues
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${API_BASE}/tables`);
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => ({ error: 'Failed to fetch tables' }));
+          const errorMsg = errorData.error || `Failed to fetch tables: ${res.status} ${res.statusText}`;
+          lastError = new Error(errorMsg);
+          // If it's a 500 error and not the last attempt, wait and retry
+          if (res.status === 500 && attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+            continue;
+          }
+          throw lastError;
+        }
+        return res.json();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error('Failed to fetch tables');
+        // If not the last attempt, wait and retry
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+          continue;
+        }
+        throw lastError;
+      }
     }
-    return res.json();
+    throw lastError || new Error('Failed to fetch tables');
   },
 
   async getTableStructure(schema: string, table: string): Promise<Column[]> {
@@ -241,6 +277,55 @@ export const api = {
     if (!res.ok) {
       const error = await res.json();
       throw new Error(error.error || 'Failed to fetch related data');
+    }
+    return res.json();
+  },
+
+  async getReverseForeignKeys(
+    schema: string,
+    table: string
+  ): Promise<Array<{
+    referencingSchema: string;
+    referencingTable: string;
+    fkColumns: string[];
+    referencedColumns: string[];
+  }>> {
+    const res = await fetch(
+      `${API_BASE}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/reverse-foreign-keys`
+    );
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({ error: 'Failed to fetch reverse foreign keys' }));
+      throw new Error(errorData.error || 'Failed to fetch reverse foreign keys');
+    }
+    return res.json();
+  },
+
+  async countRelatedRows(
+    schema: string,
+    table: string,
+    referencingSchema: string,
+    referencingTable: string,
+    fkColumns: string[],
+    referencedColumns: string[],
+    primaryKeyValues: any[]
+  ): Promise<{ count: number }> {
+    const res = await fetch(
+      `${API_BASE}/tables/${encodeURIComponent(schema)}/${encodeURIComponent(table)}/count-related`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          referencingSchema,
+          referencingTable,
+          fkColumns,
+          referencedColumns,
+          primaryKeyValues,
+        }),
+      }
+    );
+    if (!res.ok) {
+      const errorData = await res.json().catch(() => ({ error: 'Failed to count related rows' }));
+      throw new Error(errorData.error || 'Failed to count related rows');
     }
     return res.json();
   },

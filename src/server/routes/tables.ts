@@ -38,6 +38,7 @@ tableRoutes.get('/', async (req, res) => {
     const result = await executeQuery(query);
     res.json(result);
   } catch (error: any) {
+    console.error('Error fetching tables:', error);
     // Check if it's an authentication error
     const errorMessage = error.message || '';
     if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
@@ -45,7 +46,11 @@ tableRoutes.get('/', async (req, res) => {
       const { disconnect } = await import('../db/index.js');
       await disconnect();
     }
-    res.status(500).json({ error: error.message || 'Failed to fetch tables' });
+    const errorDetails = error.originalError?.message || error.originalError?.info?.message || error.message || 'Failed to fetch tables';
+    res.status(500).json({ 
+      error: error.message || 'Failed to fetch tables',
+      details: errorDetails
+    });
   }
 });
 
@@ -311,31 +316,69 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
             
             // Number operators
             case 'eq':
-              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
+              // Only convert to number if dataType is numeric, otherwise keep as string
+              const isNumericType = dataType && ['int', 'bigint', 'decimal', 'numeric', 'float', 'double', 'real', 'smallint', 'tinyint', 'money', 'smallmoney'].some(t => dataType.toLowerCase().includes(t));
+              if (isNumericType) {
+                const numValue = Number(value);
+                if (isNaN(numValue)) {
+                  console.warn(`Cannot convert filter value to number for ${columnName}, skipping`);
+                  break;
+                }
+                filterParams.push({ name: `p${paramIndex}`, value: numValue });
+              } else {
+                // For non-numeric types (varchar, uuid, etc.), use string comparison
+                filterParams.push({ name: `p${paramIndex}`, value: String(value) });
+              }
               condition = `${quotedColumn} = ${dialect.param(paramIndex)}`;
               break;
             case 'gt':
-              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
+              const gtValue = Number(value);
+              if (isNaN(gtValue)) {
+                console.warn(`Cannot convert filter value to number for ${columnName} (gt), skipping`);
+                break;
+              }
+              filterParams.push({ name: `p${paramIndex}`, value: gtValue });
               condition = `${quotedColumn} > ${dialect.param(paramIndex)}`;
               break;
             case 'gte':
-              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
+              const gteValue = Number(value);
+              if (isNaN(gteValue)) {
+                console.warn(`Cannot convert filter value to number for ${columnName} (gte), skipping`);
+                break;
+              }
+              filterParams.push({ name: `p${paramIndex}`, value: gteValue });
               condition = `${quotedColumn} >= ${dialect.param(paramIndex)}`;
               break;
             case 'lt':
-              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
+              const ltValue = Number(value);
+              if (isNaN(ltValue)) {
+                console.warn(`Cannot convert filter value to number for ${columnName} (lt), skipping`);
+                break;
+              }
+              filterParams.push({ name: `p${paramIndex}`, value: ltValue });
               condition = `${quotedColumn} < ${dialect.param(paramIndex)}`;
               break;
             case 'lte':
-              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
+              const lteValue = Number(value);
+              if (isNaN(lteValue)) {
+                console.warn(`Cannot convert filter value to number for ${columnName} (lte), skipping`);
+                break;
+              }
+              filterParams.push({ name: `p${paramIndex}`, value: lteValue });
               condition = `${quotedColumn} <= ${dialect.param(paramIndex)}`;
               break;
             case 'between':
               if (typeof value === 'object' && 'from' in value && 'to' in value) {
                 const fromParamIndex = paramIndex;
                 const toParamIndex = paramIndex + 1;
-                filterParams.push({ name: `p${fromParamIndex}`, value: Number(value.from) });
-                filterParams.push({ name: `p${toParamIndex}`, value: Number(value.to) });
+                const fromValue = Number(value.from);
+                const toValue = Number(value.to);
+                if (isNaN(fromValue) || isNaN(toValue)) {
+                  console.warn(`Cannot convert filter values to numbers for ${columnName} (between), skipping`);
+                  break;
+                }
+                filterParams.push({ name: `p${fromParamIndex}`, value: fromValue });
+                filterParams.push({ name: `p${toParamIndex}`, value: toValue });
                 condition = `${quotedColumn} BETWEEN ${dialect.param(fromParamIndex)} AND ${dialect.param(toParamIndex)}`;
                 paramIndex++; // Extra increment for second param
               }
@@ -1145,5 +1188,174 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
       await disconnect();
     }
     res.status(500).json({ error: error.message || 'Failed to fetch distinct values' });
+  }
+});
+
+// Get reverse foreign keys (tables that reference this table)
+tableRoutes.get('/:schema/:table/reverse-foreign-keys', async (req, res) => {
+  try {
+    const { schema, table } = req.params;
+    const pool = getConnection();
+    if (!pool) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
+    
+    // Query to find tables that reference the current table via foreign keys
+    const query = `
+      SELECT 
+        kcu1.table_schema as "referencingSchema",
+        kcu1.table_name as "referencingTable",
+        kcu1.column_name as "fkColumnName",
+        kcu2.column_name as "referencedColumn"
+      FROM information_schema.referential_constraints rc
+      INNER JOIN information_schema.key_column_usage kcu1
+        ON rc.constraint_catalog = kcu1.constraint_catalog
+        AND rc.constraint_schema = kcu1.constraint_schema
+        AND rc.constraint_name = kcu1.constraint_name
+      INNER JOIN information_schema.key_column_usage kcu2
+        ON rc.unique_constraint_catalog = kcu2.constraint_catalog
+        AND rc.unique_constraint_schema = kcu2.constraint_schema
+        AND rc.unique_constraint_name = kcu2.constraint_name
+        AND kcu1.ordinal_position = kcu2.ordinal_position
+      WHERE kcu2.table_schema = ${dialect.param(1)}
+        AND kcu2.table_name = ${dialect.param(2)}
+      ORDER BY kcu1.table_schema, kcu1.table_name, kcu1.ordinal_position
+    `;
+    
+    const result = await executeQuery(query, [
+      { name: 'p1', value: schema },
+      { name: 'p2', value: table }
+    ]);
+    
+    // Group by referencing table and build FK column mappings
+    const grouped: Record<string, {
+      referencingSchema: string;
+      referencingTable: string;
+      fkColumns: string[];
+      referencedColumns: string[];
+    }> = {};
+    
+    result.forEach((row: any) => {
+      // Handle column name differences between MSSQL and PostgreSQL
+      const referencingSchema = row.referencingSchema || row.referencing_schema;
+      const referencingTable = row.referencingTable || row.referencing_table;
+      const fkColumnName = row.fkColumnName || row.fk_column_name;
+      const referencedColumn = row.referencedColumn || row.referenced_column;
+      
+      const key = `${referencingSchema}.${referencingTable}`;
+      
+      if (!grouped[key]) {
+        grouped[key] = {
+          referencingSchema,
+          referencingTable,
+          fkColumns: [],
+          referencedColumns: [],
+        };
+      }
+      
+      grouped[key].fkColumns.push(fkColumnName);
+      grouped[key].referencedColumns.push(referencedColumn);
+    });
+    
+    // Convert to array format
+    const reverseFks = Object.values(grouped);
+    
+    res.json(reverseFks);
+  } catch (error: any) {
+    console.error('Error fetching reverse foreign keys:', error);
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
+      const { disconnect } = await import('../db/index.js');
+      await disconnect();
+    }
+    res.status(500).json({ error: error.message || 'Failed to fetch reverse foreign keys' });
+  }
+});
+
+// Count related rows for a foreign key relationship
+tableRoutes.post('/:schema/:table/count-related', async (req, res) => {
+  try {
+    const { schema, table } = req.params;
+    const { referencingSchema, referencingTable, fkColumns, referencedColumns, primaryKeyValues } = req.body;
+    
+    if (!referencingSchema || !referencingTable || !fkColumns || !Array.isArray(fkColumns) || 
+        !referencedColumns || !Array.isArray(referencedColumns) || 
+        !primaryKeyValues || !Array.isArray(primaryKeyValues)) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+    
+    if (fkColumns.length !== referencedColumns.length || fkColumns.length !== primaryKeyValues.length) {
+      return res.status(400).json({ error: 'FK columns, referenced columns, and primary key values arrays must have the same length' });
+    }
+    
+    const pool = getConnection();
+    if (!pool) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const isConnected = 'connected' in pool ? (pool as any).connected === true : !(pool as any).ended;
+    if (!isConnected) {
+      return res.status(400).json({ error: 'Not connected to database' });
+    }
+    
+    const dialect = getDialect();
+    const quotedSchema = dialect.quoteId(referencingSchema);
+    const quotedTable = dialect.quoteId(referencingTable);
+    
+    // Build WHERE conditions for each FK column
+    const whereConditions: string[] = [];
+    let paramIndex = 1;
+    const params: Array<{ name: string; value: any }> = [];
+    
+    fkColumns.forEach((fkCol: string, idx: number) => {
+      const quotedCol = dialect.quoteId(fkCol);
+      let pkValue = primaryKeyValues[idx];
+      
+      // Handle NaN values - convert to null
+      if (typeof pkValue === 'number' && isNaN(pkValue)) {
+        pkValue = null;
+      }
+      
+      // Handle string "NaN" - convert to null
+      if (pkValue === 'NaN' || pkValue === 'nan') {
+        pkValue = null;
+      }
+      
+      if (pkValue === null || pkValue === undefined) {
+        whereConditions.push(`${quotedCol} IS NULL`);
+      } else {
+        whereConditions.push(`${quotedCol} = ${dialect.param(paramIndex)}`);
+        params.push({ name: `p${paramIndex}`, value: pkValue });
+        paramIndex++;
+      }
+    });
+    
+    const query = `
+      SELECT COUNT(*) as "count"
+      FROM ${quotedSchema}.${quotedTable}
+      WHERE ${whereConditions.join(' AND ')}
+    `;
+    
+    const result = await executeQuery(query, params);
+    
+    // Handle column name differences
+    const count = result[0]?.count || result[0]?.COUNT || 0;
+    
+    res.json({ count: Number(count) });
+  } catch (error: any) {
+    console.error('Error counting related rows:', error);
+    const errorMessage = error.message || '';
+    if (errorMessage.includes('Login failed') || errorMessage.includes('authentication') || errorMessage.includes('password authentication')) {
+      const { disconnect } = await import('../db/index.js');
+      await disconnect();
+    }
+    res.status(500).json({ error: error.message || 'Failed to count related rows' });
   }
 });

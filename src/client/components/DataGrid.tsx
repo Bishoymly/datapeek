@@ -17,7 +17,7 @@ import { formatName } from '@/lib/nameFormatter';
 import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2, MoreVertical } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2, MoreVertical, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -30,6 +30,7 @@ import {
 import { FilterDialog, type Filter as FilterType } from './FilterDialog';
 import { ColumnOptionsDialog } from './ColumnOptionsDialog';
 import { JsonCell } from './JsonCell';
+import { RelatedTablesMenu } from './RelatedTablesMenu';
 
 
 interface DataGridProps {
@@ -39,6 +40,10 @@ interface DataGridProps {
   onQueryChange?: (query: string) => void;
   onCreateQuery?: (query: string) => void;
   nameDisplayMode?: 'database-names' | 'friendly-names';
+  fkDisplayMode?: 'key-only' | 'key-display' | 'display-only';
+  initialFilters?: FilterType[];
+  onFiltersChange?: (filters: FilterType[]) => void;
+  onOpenRelatedTable?: (schema: string, table: string, filters: FilterType[]) => void;
 }
 
 const TABLE_CONFIG_STORAGE_KEY = 'datapeek_table_config';
@@ -258,7 +263,18 @@ function formatFilterValue(filter: FilterType): string {
   return String(filter.value ?? '');
 }
 
-export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreateQuery, nameDisplayMode = 'database-names' }: DataGridProps) {
+export function DataGrid({ 
+  schema, 
+  table, 
+  connectionInfo, 
+  onQueryChange, 
+  onCreateQuery, 
+  nameDisplayMode = 'database-names',
+  fkDisplayMode = 'key-display',
+  initialFilters,
+  onFiltersChange,
+  onOpenRelatedTable,
+}: DataGridProps) {
   const connectionId = connectionInfo?.connectionId || null;
   const dbType = connectionInfo?.dbType || 'mssql';
   
@@ -267,38 +283,6 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     return dbType === 'postgres' ? `"${name}"` : `[${name}]`;
   }, [dbType]);
   
-  // Helper functions for FK display mode persistence
-  const getFkDisplayMode = useCallback((): 'key-only' | 'key-display' | 'display-only' => {
-    if (!connectionId) return 'key-only';
-    try {
-      const baseKey = `datapeek_fk_display_mode_${schema}_${table}`;
-      const key = getConnectionKey(baseKey, connectionId);
-      const saved = localStorage.getItem(key);
-      if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
-        return saved;
-      }
-      // Check global key for backward compatibility
-      const globalKey = baseKey;
-      const globalSaved = localStorage.getItem(globalKey);
-      if (globalSaved === 'key-only' || globalSaved === 'key-display' || globalSaved === 'display-only') {
-        return globalSaved;
-      }
-    } catch {
-      // Ignore storage errors
-    }
-    return 'key-only';
-  }, [schema, table, connectionId]);
-
-  const saveFkDisplayMode = useCallback((mode: 'key-only' | 'key-display' | 'display-only') => {
-    if (!connectionId) return;
-    try {
-      const baseKey = `datapeek_fk_display_mode_${schema}_${table}`;
-      const key = getConnectionKey(baseKey, connectionId);
-      localStorage.setItem(key, mode);
-    } catch {
-      // Ignore storage errors
-    }
-  }, [schema, table, connectionId]);
 
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
@@ -306,30 +290,13 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
   const [columnOrder, setColumnOrder] = useState<ColumnOrderState>([]);
   const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
-  const [structuredFilters, setStructuredFilters] = useState<FilterType[]>([]);
+  const [structuredFilters, setStructuredFilters] = useState<FilterType[]>(initialFilters || []);
+  const [selectedRowForMenu, setSelectedRowForMenu] = useState<{ row: Record<string, any>; position: { top: number; left: number }; rowIndex: number } | null>(null);
+  const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
+  const expandButtonRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const [showColumnOptions, setShowColumnOptions] = useState<string | null>(null);
   const [columnOptionsPosition, setColumnOptionsPosition] = useState<{ top: number; left: number } | null>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
-  const [fkDisplayMode, setFkDisplayMode] = useState<'key-only' | 'key-display' | 'display-only'>(() => {
-    if (!connectionId) return 'key-only';
-    try {
-      const baseKey = `datapeek_fk_display_mode_${schema}_${table}`;
-      const key = getConnectionKey(baseKey, connectionId);
-      const saved = localStorage.getItem(key);
-      if (saved === 'key-only' || saved === 'key-display' || saved === 'display-only') {
-        return saved;
-      }
-      // Check global key for backward compatibility
-      const globalKey = baseKey;
-      const globalSaved = localStorage.getItem(globalKey);
-      if (globalSaved === 'key-only' || globalSaved === 'key-display' || globalSaved === 'display-only') {
-        return globalSaved;
-      }
-    } catch {
-      // Ignore storage errors
-    }
-    return 'key-only';
-  });
   const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
   const dragStartPos = useRef<number | null>(null);
@@ -384,8 +351,6 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     setStructuredFilters([]);
     setShowColumnOptions(null);
     setColumnOptionsPosition(null);
-    // Load FK display mode for the new table
-    setFkDisplayMode(getFkDisplayMode());
   }, [schema, table]);
 
   // Sync structuredFilters with columnFilters (for backward compatibility with react-table)
@@ -463,13 +428,49 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     return fkMap;
   }, [tableStructure]);
 
+  // Get primary key columns
+  const primaryKeyColumns = useMemo(() => {
+    if (!tableStructure) return [];
+    return tableStructure
+      .filter(col => col.isPrimaryKey === 1)
+      .map(col => col.columnName)
+      .sort((a, b) => {
+        // Maintain order based on table structure
+        const aIndex = tableStructure.findIndex(c => c.columnName === a);
+        const bIndex = tableStructure.findIndex(c => c.columnName === b);
+        return aIndex - bIndex;
+      });
+  }, [tableStructure]);
+
+  // Initialize filters from props
+  useEffect(() => {
+    if (initialFilters && initialFilters.length > 0) {
+      setStructuredFilters(initialFilters);
+      // Convert to column filters format
+      const colFilters: ColumnFiltersState = initialFilters.map(filter => ({
+        id: filter.column,
+        value: filter.value,
+      }));
+      setColumnFilters(colFilters);
+    }
+  }, [JSON.stringify(initialFilters)]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Notify parent of filter changes
+  useEffect(() => {
+    if (onFiltersChange) {
+      onFiltersChange(structuredFilters);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [structuredFilters]);
+
 
   // Update query in parent when data changes
   useEffect(() => {
     if (data?.query && onQueryChange) {
       onQueryChange(data.query);
     }
-  }, [data?.query, onQueryChange]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data?.query]);
 
   // Get default column order from data
   const defaultColumnOrder = useMemo(() => {
@@ -975,6 +976,31 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     });
   }, [visibleColumnIds]);
 
+  // Handle expand button click (plus icon)
+  const handleExpandClick = useCallback((e: React.MouseEvent, rowIndex: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (!data?.data || rowIndex < 0 || rowIndex >= data.data.length || primaryKeyColumns.length === 0 || !onOpenRelatedTable) {
+      return;
+    }
+
+    const row = data.data[rowIndex];
+    const expandButton = expandButtonRefs.current.get(rowIndex);
+    
+    if (expandButton) {
+      const rect = expandButton.getBoundingClientRect();
+      setSelectedRowForMenu({
+        row,
+        position: {
+          top: rect.bottom + 4,
+          left: rect.left,
+        },
+        rowIndex,
+      });
+    }
+  }, [data?.data, primaryKeyColumns, onOpenRelatedTable]);
+
   // Handle select all header click
   const handleSelectAllClick = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1226,6 +1252,21 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     }
   }, [isSelecting]);
 
+  // Close menu when clicking outside
+  useEffect(() => {
+    if (!selectedRowForMenu) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-related-menu]') && !target.closest('[data-expand-button]')) {
+        setSelectedRowForMenu(null);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [selectedRowForMenu]);
+
   // Close column options dialog on scroll
   useEffect(() => {
     if (!showColumnOptions) return;
@@ -1387,48 +1428,6 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
             )}
           </div>
           <div className="flex items-center gap-2">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  title="Foreign key display mode"
-                >
-                  <Link2 className="h-3 w-3 mr-1.5" />
-                  FK: {fkDisplayMode === 'key-only' ? 'Key Only' : fkDisplayMode === 'key-display' ? 'Key - Display' : 'Display Only'}
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem
-                  onClick={() => {
-                    setFkDisplayMode('key-only');
-                    saveFkDisplayMode('key-only');
-                  }}
-                  className={fkDisplayMode === 'key-only' ? 'bg-accent' : ''}
-                >
-                  Key Only
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    setFkDisplayMode('key-display');
-                    saveFkDisplayMode('key-display');
-                  }}
-                  className={fkDisplayMode === 'key-display' ? 'bg-accent' : ''}
-                >
-                  Key - Display
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    setFkDisplayMode('display-only');
-                    saveFkDisplayMode('display-only');
-                  }}
-                  className={fkDisplayMode === 'display-only' ? 'bg-accent' : ''}
-                >
-                  Display Only
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
             {onCreateQuery && (
               <Button 
                 variant="outline" 
@@ -1699,18 +1698,51 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
               return (
                 <tr
                   key={row.id}
-                  className="border-b hover:bg-muted/30 transition-colors"
+                  ref={(el) => {
+                    if (el) {
+                      rowRefs.current.set(rowIndex, el);
+                    } else {
+                      rowRefs.current.delete(rowIndex);
+                    }
+                  }}
+                  className="border-b hover:bg-muted/30 transition-colors group"
                 >
-                  {/* Row number cell */}
+                  {/* Row number cell with expand button */}
                   <td
                     className={cn(
-                      "border-r border-border/50 p-2 text-xs text-muted-foreground select-none cursor-pointer bg-muted/30 w-12 text-center",
+                      "border-r border-border/50 p-2 text-xs text-muted-foreground select-none bg-muted/30 w-12",
                       rowIsSelected && "bg-primary/20"
                     )}
-                    onMouseDown={(e) => handleRowHeaderClick(e, rowIndex)}
-                    onMouseEnter={() => handleRowHeaderMouseEnter(rowIndex)}
                   >
-                    {actualRowNumber}
+                    <div className="flex items-center justify-center gap-1">
+                      {primaryKeyColumns.length > 0 && onOpenRelatedTable && (
+                        <button
+                          data-expand-button
+                          ref={(el) => {
+                            if (el) {
+                              expandButtonRefs.current.set(rowIndex, el);
+                            } else {
+                              expandButtonRefs.current.delete(rowIndex);
+                            }
+                          }}
+                          onClick={(e) => handleExpandClick(e, rowIndex)}
+                          className="p-0.5 rounded hover:bg-accent transition-colors opacity-0 group-hover:opacity-100"
+                          title="Show related tables"
+                        >
+                          <Plus className="h-3 w-3" />
+                        </button>
+                      )}
+                      <span
+                        className={cn(
+                          "cursor-pointer flex-1 text-center",
+                          primaryKeyColumns.length > 0 && onOpenRelatedTable && "group-hover:ml-0"
+                        )}
+                        onMouseDown={(e) => handleRowHeaderClick(e, rowIndex)}
+                        onMouseEnter={() => handleRowHeaderMouseEnter(rowIndex)}
+                      >
+                        {actualRowNumber}
+                      </span>
+                    </div>
                   </td>
                   {row.getVisibleCells().map((cell) => {
                     const columnId = cell.column.id || String(cell.column.accessorKey);
@@ -1819,6 +1851,22 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
           />
         );
       })()}
+
+      {/* Related Tables Menu */}
+      {selectedRowForMenu && primaryKeyColumns.length > 0 && onOpenRelatedTable && (
+        <RelatedTablesMenu
+          schema={schema}
+          table={table}
+          selectedRow={selectedRowForMenu.row}
+          primaryKeyColumns={primaryKeyColumns}
+          onOpenRelatedTable={onOpenRelatedTable}
+          connectionInfo={connectionInfo}
+          nameDisplayMode={nameDisplayMode}
+          position={selectedRowForMenu.position}
+          open={!!selectedRowForMenu}
+          onClose={() => setSelectedRowForMenu(null)}
+        />
+      )}
 
       <div className="border-t p-2 flex items-center justify-between bg-muted/30">
         <div className="text-xs text-muted-foreground">

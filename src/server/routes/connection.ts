@@ -40,8 +40,15 @@ connectionRoutes.post('/test', async (req, res) => {
 
 // Get provided connection string (if any)
 connectionRoutes.get('/provided', (req, res) => {
-  const connString = getProvidedConnectionString();
-  res.json({ connectionString: connString || null });
+  try {
+    const connString = getProvidedConnectionString();
+    res.json({ connectionString: connString || null });
+  } catch (error: any) {
+    res.status(500).json({ 
+      connectionString: null,
+      error: error.message || 'Failed to get connection string' 
+    });
+  }
 });
 
 // Establish connection

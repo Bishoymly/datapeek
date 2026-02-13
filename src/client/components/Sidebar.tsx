@@ -230,9 +230,7 @@ export function Sidebar({
 
   // Refresh favorites when favoritesUpdated timestamp changes
   useEffect(() => {
-    if (favoritesUpdated) {
-      setFavorites(getFavorites(connectionId));
-    }
+    setFavorites(getFavorites(connectionId));
   }, [favoritesUpdated, connectionId]);
 
 
