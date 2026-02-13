@@ -29,6 +29,7 @@ import {
 } from './ui/dropdown-menu';
 import { FilterDialog, type Filter as FilterType } from './FilterDialog';
 import { ColumnOptionsDialog } from './ColumnOptionsDialog';
+import { JsonCell } from './JsonCell';
 
 
 interface DataGridProps {
@@ -259,6 +260,12 @@ function formatFilterValue(filter: FilterType): string {
 
 export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreateQuery, nameDisplayMode = 'database-names' }: DataGridProps) {
   const connectionId = connectionInfo?.connectionId || null;
+  const dbType = connectionInfo?.dbType || 'mssql';
+  
+  // Helper function to quote identifiers based on database type
+  const quoteId = useCallback((name: string): string => {
+    return dbType === 'postgres' ? `"${name}"` : `[${name}]`;
+  }, [dbType]);
   
   // Helper functions for FK display mode persistence
   const getFkDisplayMode = useCallback((): 'key-only' | 'key-display' | 'display-only' => {
@@ -604,10 +611,10 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
         // Check if this is a foreign key column and if we have a display value
         const displayColumn = `${key}_display`;
         const displayValue = row.original[displayColumn];
-        const str = String(value);
         
         // Render based on FK display mode
         if (displayValue !== null && displayValue !== undefined) {
+          const str = String(value);
           if (fkDisplayMode === 'key-display') {
             // Display both ID and friendly name with a dash separator
             return (
@@ -624,7 +631,24 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
           }
         }
         
+        // Check if value is JSON (object, array, or valid JSON string)
+        const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date);
+        const isJsonString = typeof value === 'string' && (() => {
+          try {
+            JSON.parse(value);
+            return true;
+          } catch {
+            return false;
+          }
+        })();
+        
+        // Use JsonCell for JSON values, otherwise render as string
+        if (isJsonObject || isJsonString) {
+          return <JsonCell value={value} className="max-w-md" />;
+        }
+        
         // For 'key-only' mode or when no display value, show just the key
+        const str = String(value);
         return (
           <span className="font-mono text-xs truncate max-w-md">{str}</span>
         );
@@ -664,8 +688,8 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
         .map(col => col.id)
         .filter((id): id is string => !!id)
         .filter(id => !id.endsWith('_display'));
-      const columnList = visibleCols.map(col => `[${col}]`).join(', ');
-      return `SELECT ${columnList}\nFROM [${schema}].[${table}]`;
+      const columnList = visibleCols.map(col => quoteId(col)).join(', ');
+      return `SELECT ${columnList}\nFROM ${quoteId(schema)}.${quoteId(table)}`;
     }
     
     // Parse and modify the query
@@ -675,9 +699,15 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     const currentOffset = (page - 1) * pageSize;
     
     // Replace pagination with current page values
-    // Handle OFFSET/FETCH pagination (multiline pattern)
-    query = query.replace(/\n\s*OFFSET\s+\d+\s+ROWS\s*\n?\s*FETCH\s+NEXT\s+\d+\s+ROWS\s+ONLY/gi, `\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`);
-    query = query.replace(/\s+OFFSET\s+\d+\s+ROWS\s+FETCH\s+NEXT\s+\d+\s+ROWS\s+ONLY/gi, ` OFFSET ${currentOffset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`);
+    // Handle PostgreSQL LIMIT/OFFSET pagination
+    if (dbType === 'postgres') {
+      query = query.replace(/LIMIT\s+\d+\s+OFFSET\s+\d+/gi, `LIMIT ${pageSize} OFFSET ${currentOffset}`);
+      query = query.replace(/OFFSET\s+\d+\s+LIMIT\s+\d+/gi, `OFFSET ${currentOffset} LIMIT ${pageSize}`);
+    } else {
+      // Handle SQL Server OFFSET/FETCH pagination (multiline pattern)
+      query = query.replace(/\n\s*OFFSET\s+\d+\s+ROWS\s*\n?\s*FETCH\s+NEXT\s+\d+\s+ROWS\s+ONLY/gi, `\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`);
+      query = query.replace(/\s+OFFSET\s+\d+\s+ROWS\s+FETCH\s+NEXT\s+\d+\s+ROWS\s+ONLY/gi, ` OFFSET ${currentOffset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`);
+    }
     
     // Handle ROW_NUMBER pagination pattern (for fallback queries)
     // Pattern: FROM (SELECT *, ROW_NUMBER() OVER (...) as rn FROM ...) t WHERE t.rn > ... AND t.rn <= ...
@@ -704,23 +734,23 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
       if (fkDisplayMode === 'display-only' && isFk && displayCol) {
         // Replace FK key column with display column, keeping original column position.
         const alias = `fk_${col}`;
-        allSelectedColumns.push(`${alias}.[${displayCol}] as [${col}]`);
+        allSelectedColumns.push(`${quoteId(alias)}.${quoteId(displayCol)} as ${quoteId(col)}`);
         return;
       }
 
       // Default column output (key-only and key-display base key column)
-      allSelectedColumns.push(`[${baseTableAlias}].[${col}]`);
+      allSelectedColumns.push(`${quoteId(baseTableAlias)}.${quoteId(col)}`);
 
       // In key-display mode include paired display column right after its key.
       if (fkDisplayMode === 'key-display' && isFk && displayCol) {
         const alias = `fk_${col}`;
-        allSelectedColumns.push(`${alias}.[${displayCol}] as [${col}_display]`);
+        allSelectedColumns.push(`${quoteId(alias)}.${quoteId(displayCol)} as ${quoteId(`${col}_display`)}`);
       }
     });
 
     const columnList = allSelectedColumns.length > 0
       ? allSelectedColumns.join(', ')
-      : `[${baseTableAlias}].*`;
+      : `${quoteId(baseTableAlias)}.*`;
 
     // Replace SELECT clause - find the first FROM and preserve everything after it (JOINs, WHERE, ORDER BY)
     // The query structure is: SELECT ... FROM ... [JOINs] [WHERE] [ORDER BY] [OFFSET/FETCH]
@@ -758,13 +788,15 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
       tableStructure.forEach((col) => {
         if (col.referencedSchema && col.referencedTable && col.referencedColumn) {
           const alias = `fk_${col.columnName}`;
-          joins.push(`LEFT JOIN [${col.referencedSchema}].[${col.referencedTable}] ${alias} ON [${baseTableAlias}].[${col.columnName}] = ${alias}.[${col.referencedColumn}]`);
+          joins.push(`LEFT JOIN ${quoteId(col.referencedSchema)}.${quoteId(col.referencedTable)} ${quoteId(alias)} ON ${quoteId(baseTableAlias)}.${quoteId(col.columnName)} = ${quoteId(alias)}.${quoteId(col.referencedColumn)}`);
         }
       });
       
       if (joins.length > 0) {
-        // Insert JOINs after FROM clause
-        const fromMatch = query.match(/FROM\s+\[([^\]]+)\]\.\[([^\]]+)\]\s+([^\s\n]+)/i);
+        // Insert JOINs after FROM clause - match both bracket and quote styles
+        // Pattern: FROM [schema].[table] alias or FROM "schema"."table" alias
+        const fromMatch = query.match(/FROM\s+(?:\[([^\]]+)\]|"([^"]+)")\s*\.\s*(?:\[([^\]]+)\]|"([^"]+)")?\s+([^\s\n]+)/i) ||
+                         query.match(/FROM\s+([^\s.]+)\s*\.\s*([^\s.]+)\s+([^\s\n]+)/i);
         if (fromMatch) {
           const fromClause = fromMatch[0];
           const afterFrom = query.substring(query.indexOf(fromClause) + fromClause.length);
@@ -793,15 +825,25 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     }
     
     // Ensure pagination is present - if no pagination found, add it after ORDER BY
-    if (!query.match(/OFFSET\s+\d+\s+ROWS/i) && !query.match(/\.rn\s*>/i)) {
+    // Use database-appropriate pagination syntax
+    const hasPagination = query.match(/OFFSET\s+\d+/i) || query.match(/LIMIT\s+\d+/i) || query.match(/\.rn\s*>/i);
+    if (!hasPagination) {
       // Find ORDER BY clause
       const orderByMatch = query.match(/(ORDER\s+BY\s+[^\n]+)/i);
       if (orderByMatch) {
         // Add pagination after ORDER BY
-        query = query.replace(/(ORDER\s+BY\s+[^\n]+)/i, `$1\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`);
+        if (dbType === 'postgres') {
+          query = query.replace(/(ORDER\s+BY\s+[^\n]+)/i, `$1\nLIMIT ${pageSize} OFFSET ${currentOffset}`);
+        } else {
+          query = query.replace(/(ORDER\s+BY\s+[^\n]+)/i, `$1\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`);
+        }
       } else {
         // No ORDER BY, add pagination at the end
-        query += `\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
+        if (dbType === 'postgres') {
+          query += `\nLIMIT ${pageSize} OFFSET ${currentOffset}`;
+        } else {
+          query += `\nOFFSET ${currentOffset} ROWS\nFETCH NEXT ${pageSize} ROWS ONLY`;
+        }
       }
     }
     
@@ -816,7 +858,9 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
     data?.query,
     data?.foreignKeyDisplays,
     page,
-    pageSize
+    pageSize,
+    dbType,
+    quoteId
   ]);
 
   const handleCreateQuery = useCallback(() => {

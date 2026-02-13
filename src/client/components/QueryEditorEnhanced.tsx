@@ -7,6 +7,7 @@ import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { DataGrid } from './DataGrid';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
+import { JsonCell } from './JsonCell';
 
 const QUERIES_STORAGE_KEY = 'datapeek_queries';
 
@@ -1226,9 +1227,23 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                                   >
                                     {row[key] === null || row[key] === undefined ? (
                                       <span className="text-muted-foreground italic">NULL</span>
-                                    ) : (
-                                      <span className="truncate max-w-md block">{String(row[key])}</span>
-                                    )}
+                                    ) : (() => {
+                                      const value = row[key];
+                                      const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date);
+                                      const isJsonString = typeof value === 'string' && (() => {
+                                        try {
+                                          JSON.parse(value);
+                                          return true;
+                                        } catch {
+                                          return false;
+                                        }
+                                      })();
+                                      
+                                      if (isJsonObject || isJsonString) {
+                                        return <JsonCell value={value} className="max-w-md" />;
+                                      }
+                                      return <span className="truncate max-w-md block">{String(value)}</span>;
+                                    })()}
                                   </td>
                                 );
                               })}

@@ -222,18 +222,18 @@ export function Sidebar({
   // Refresh queries when queriesUpdated timestamp changes
   useEffect(() => {
     if (queriesUpdated) {
-      setQueries(getQueries());
+      setQueries(getQueries(connectionId));
       // Ensure Queries section is expanded when a new query is added
       setExpandedSchemas(prev => new Set([...prev, 'Queries']));
     }
-  }, [queriesUpdated]);
+  }, [queriesUpdated, connectionId]);
 
   // Refresh favorites when favoritesUpdated timestamp changes
   useEffect(() => {
     if (favoritesUpdated) {
-      setFavorites(getFavorites());
+      setFavorites(getFavorites(connectionId));
     }
-  }, [favoritesUpdated]);
+  }, [favoritesUpdated, connectionId]);
 
 
   // Auto-expand schemas when searching, auto-collapse when clearing search

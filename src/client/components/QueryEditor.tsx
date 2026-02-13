@@ -6,6 +6,7 @@ import { Play, Loader2, History, X } from 'lucide-react';
 import { api } from '@/lib/api';
 import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { cn } from '@/lib/utils';
+import { JsonCell } from './JsonCell';
 
 const QUERY_HISTORY_KEY = 'datapeek_query_history';
 const MAX_HISTORY = 20;
@@ -685,9 +686,23 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
                             >
                               {row[key] === null || row[key] === undefined ? (
                                 <span className="text-muted-foreground italic">NULL</span>
-                              ) : (
-                                String(row[key])
-                              )}
+                              ) : (() => {
+                                const value = row[key];
+                                const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date);
+                                const isJsonString = typeof value === 'string' && (() => {
+                                  try {
+                                    JSON.parse(value);
+                                    return true;
+                                  } catch {
+                                    return false;
+                                  }
+                                })();
+                                
+                                if (isJsonObject || isJsonString) {
+                                  return <JsonCell value={value} />;
+                                }
+                                return String(value);
+                              })()}
                             </td>
                           );
                         })}
