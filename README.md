@@ -4,16 +4,6 @@
 
 Datapeek provides an intuitive web-based interface to browse, query, and explore your SQL Server and PostgreSQL databases directly from your terminal.
 
-## Screenshots
-
-### Light Mode
-![Datapeek Light Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/light1.png)
-![Datapeek Light Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/light2.png)
-
-### Dark Mode
-![Datapeek Dark Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/dark1.png)
-![Datapeek Dark Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/dark2.png)
-
 ## Quick Start
 
 ### Option 1: With Connection String (Recommended)
@@ -41,6 +31,16 @@ npx datapeek
 ```
 
 A connection dialog will open in your browser where you can enter your database connection details.
+
+## Screenshots
+
+### Light Mode
+![Datapeek Light Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/light1.png)
+![Datapeek Light Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/light2.png)
+
+### Dark Mode
+![Datapeek Dark Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/dark1.png)
+![Datapeek Dark Mode](https://raw.githubusercontent.com/bishoymly/datapeek/main/public/screenshots/dark2.png)
 
 ## Features
 
