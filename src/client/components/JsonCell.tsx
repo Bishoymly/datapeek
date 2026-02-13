@@ -12,24 +12,30 @@ export function JsonCell({ value, className }: JsonCellProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Try to parse JSON if it's a string
-  let jsonValue: any = value;
-  let isJsonString = false;
+  // Check if value is already an object or array
+  const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date) && !(value instanceof RegExp);
   
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      jsonValue = parsed;
-      isJsonString = true;
-    } catch {
-      // Not valid JSON, treat as regular string
-      jsonValue = value;
-      isJsonString = false;
+  // For strings, only treat as JSON if it looks like JSON (starts with { or [) and parses to object/array
+  let isJsonString = false;
+  let jsonValue: any = value;
+  
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const trimmed = value.trim();
+    // Only attempt to parse if it looks like JSON (starts with { or [)
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(value);
+        // Only treat as JSON if it parsed to an object or array (not primitive values)
+        if (typeof parsed === 'object' && parsed !== null && !(parsed instanceof Date)) {
+          jsonValue = parsed;
+          isJsonString = true;
+        }
+      } catch {
+        // Not valid JSON, treat as regular string
+        isJsonString = false;
+      }
     }
   }
-
-  // Check if it's an object or array
-  const isJsonObject = typeof jsonValue === 'object' && jsonValue !== null && !(jsonValue instanceof Date);
 
   if (!isJsonObject && !isJsonString) {
     // Not JSON, render as regular value

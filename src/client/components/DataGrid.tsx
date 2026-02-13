@@ -631,15 +631,21 @@ export function DataGrid({ schema, table, connectionInfo, onQueryChange, onCreat
           }
         }
         
-        // Check if value is JSON (object, array, or valid JSON string)
-        const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date);
-        const isJsonString = typeof value === 'string' && (() => {
-          try {
-            JSON.parse(value);
-            return true;
-          } catch {
-            return false;
+        // Check if value is JSON (object, array, or valid JSON string that looks like JSON)
+        const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date) && !(value instanceof RegExp);
+        const isJsonString = typeof value === 'string' && value.trim().length > 0 && (() => {
+          const trimmed = value.trim();
+          // Only treat as JSON if it starts with { or [ and parses to object/array
+          if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+            try {
+              const parsed = JSON.parse(value);
+              // Only treat as JSON if it parsed to an object or array (not primitive values)
+              return typeof parsed === 'object' && parsed !== null && !(parsed instanceof Date);
+            } catch {
+              return false;
+            }
           }
+          return false;
         })();
         
         // Use JsonCell for JSON values, otherwise render as string

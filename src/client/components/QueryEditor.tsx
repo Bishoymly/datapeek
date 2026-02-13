@@ -688,14 +688,18 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
                                 <span className="text-muted-foreground italic">NULL</span>
                               ) : (() => {
                                 const value = row[key];
-                                const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date);
-                                const isJsonString = typeof value === 'string' && (() => {
-                                  try {
-                                    JSON.parse(value);
-                                    return true;
-                                  } catch {
-                                    return false;
+                                const isJsonObject = typeof value === 'object' && value !== null && !(value instanceof Date) && !(value instanceof RegExp);
+                                const isJsonString = typeof value === 'string' && value.trim().length > 0 && (() => {
+                                  const trimmed = value.trim();
+                                  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                                    try {
+                                      const parsed = JSON.parse(value);
+                                      return typeof parsed === 'object' && parsed !== null && !(parsed instanceof Date);
+                                    } catch {
+                                      return false;
+                                    }
                                   }
+                                  return false;
                                 })();
                                 
                                 if (isJsonObject || isJsonString) {

@@ -38,15 +38,32 @@ export function ConnectionDialog({ open, onConnect, onError }: ConnectionDialogP
   const [connectionStringInput, setConnectionStringInput] = useState('');
 
   async function handleConnect(connConfig?: ConnectionConfig) {
-    const finalConfig = connConfig || { ...config, dbType };
-    // Ensure dbType is set
-    finalConfig.dbType = dbType;
-    // For PostgreSQL, set SSL options
-    if (dbType === 'postgres') {
-      finalConfig.options = {
-        ssl: sslMode === 'require' || sslMode === 'prefer',
-      };
+    let finalConfig: ConnectionConfig;
+    
+    // If in connection-string mode, parse the connection string first
+    if (connectionType === 'connection-string' && connectionStringInput.trim()) {
+      try {
+        const parsed = parseConnectionString(connectionStringInput.trim());
+        finalConfig = parsed;
+        if (parsed.dbType) {
+          setDbType(parsed.dbType);
+        }
+      } catch (e) {
+        setError(`Failed to parse connection string: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        return;
+      }
+    } else {
+      finalConfig = connConfig || { ...config, dbType };
+      // Ensure dbType is set
+      finalConfig.dbType = dbType;
+      // For PostgreSQL, set SSL options
+      if (dbType === 'postgres') {
+        finalConfig.options = {
+          ssl: sslMode === 'require' || sslMode === 'prefer',
+        };
+      }
     }
+    
     setTesting(true);
     setError(null);
 
@@ -347,41 +364,31 @@ export function ConnectionDialog({ open, onConnect, onError }: ConnectionDialogP
                   <div className="flex items-center justify-between">
                     <Label htmlFor="connectionString" className="text-xs font-medium">Connection String</Label>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="space-y-1.5">
                     <textarea
                       id="connectionString"
-                      className="flex-1 min-h-[240px] min-w-[600px] px-3 py-2 text-sm border rounded-md bg-background resize-none font-mono focus:outline-none focus:ring-2 focus:ring-ring"
-                      placeholder="Paste connection string here...&#10;&#10;SQL Server: Server=localhost;Database=mydb;User Id=sa;Password=pass;&#10;PostgreSQL: postgresql://user:pass@localhost:5432/mydb"
+                      className="w-full min-h-[240px] min-w-[600px] px-3 py-2 text-sm border rounded-md bg-background resize-none font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                      placeholder="Paste connection string here and press Enter to connect...&#10;&#10;SQL Server: Server=localhost;Database=mydb;User Id=sa;Password=pass;&#10;PostgreSQL: postgresql://user:pass@localhost:5432/mydb"
                       value={connectionStringInput}
                       onChange={(e) => handleConnectionStringChange(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
                           e.preventDefault();
-                          handlePasteConnectionString();
+                          if (connectionStringInput.trim() && !testing) {
+                            handleConnect();
+                          }
                         }
                       }}
                     />
-                    <div className="flex flex-col gap-2">
-                      <Button
-                        type="button"
-                        variant="default"
-                        size="sm"
-                        onClick={handlePasteConnectionString}
-                        disabled={!connectionStringInput.trim()}
-                        className="h-8 text-xs"
-                      >
-                        Parse
-                      </Button>
-                      {connectionStringInput && (
-                        <p className="text-xs text-muted-foreground text-center whitespace-nowrap">
-                          {connectionStringInput.trim().startsWith('postgresql://') || connectionStringInput.trim().startsWith('postgres://')
-                            ? 'PostgreSQL'
-                            : connectionStringInput.includes('Server=') || connectionStringInput.includes('Data Source=')
-                            ? 'SQL Server'
-                            : ''}
-                        </p>
-                      )}
-                    </div>
+                    {connectionStringInput && (
+                      <p className="text-xs text-muted-foreground">
+                        {connectionStringInput.trim().startsWith('postgresql://') || connectionStringInput.trim().startsWith('postgres://')
+                          ? 'Detected: PostgreSQL • Press Ctrl+Enter to connect'
+                          : connectionStringInput.includes('Server=') || connectionStringInput.includes('Data Source=')
+                          ? 'Detected: SQL Server • Press Ctrl+Enter to connect'
+                          : 'Press Ctrl+Enter to connect'}
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -537,25 +544,27 @@ export function ConnectionDialog({ open, onConnect, onError }: ConnectionDialogP
               )}
 
               <div className="flex gap-2 pt-1">
-                <Button
-                  variant="outline"
-                  onClick={handleTest}
-                  disabled={testing || !config.server || !config.database}
-                  className="flex-1 h-8 text-sm"
-                >
-                  {testing ? (
-                    <>
-                      <Loader2 className="mr-2 h-3 w-3 animate-spin" />
-                      Testing...
-                    </>
-                  ) : (
-                    'Test'
-                  )}
-                </Button>
+                {connectionType !== 'connection-string' && (
+                  <Button
+                    variant="outline"
+                    onClick={handleTest}
+                    disabled={testing || !config.server || !config.database}
+                    className="flex-1 h-8 text-sm"
+                  >
+                    {testing ? (
+                      <>
+                        <Loader2 className="mr-2 h-3 w-3 animate-spin" />
+                        Testing...
+                      </>
+                    ) : (
+                      'Test'
+                    )}
+                  </Button>
+                )}
                 <Button
                   onClick={() => handleConnect()}
-                  disabled={testing || !config.server || !config.database}
-                  className="flex-1 h-8 text-sm"
+                  disabled={testing || (connectionType === 'connection-string' ? !connectionStringInput.trim() : (!config.server || !config.database))}
+                  className={connectionType === 'connection-string' ? "w-full h-8 text-sm" : "flex-1 h-8 text-sm"}
                 >
                   {testing ? (
                     <>

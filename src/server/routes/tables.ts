@@ -109,14 +109,14 @@ tableRoutes.get('/:schema/:table', async (req, res) => {
       ) fk ON c.table_schema = fk.table_schema
         AND c.table_name = fk.table_name
         AND c.column_name = fk.column_name
-      WHERE c.table_schema = @schema
-        AND c.table_name = @table
+      WHERE c.table_schema = ${dialect.param(1)}
+        AND c.table_name = ${dialect.param(2)}
       ORDER BY c.ordinal_position
     `;
     
     const result = await executeQuery(query, [
-      { name: 'schema', value: schema },
-      { name: 'table', value: table }
+      { name: 'p1', value: schema },
+      { name: 'p2', value: table }
     ]);
     
     res.json(result);
@@ -235,9 +235,9 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           WHERE table_schema = ${dialect.param(1)} AND table_name = ${dialect.param(2)} AND column_name IN (${placeholders})
         `;
         const validateParams = [
-          { name: 'schema', value: schema },
-          { name: 'table', value: table },
-          ...columnNames.map((col) => ({ name: 'col', value: col }))
+          { name: 'p1', value: schema },
+          { name: 'p2', value: table },
+          ...columnNames.map((col, idx) => ({ name: `p${idx + 3}`, value: col }))
         ];
         const validateResult = await executeQuery(validateQuery, validateParams);
         validateResult.forEach((r: any) => {
@@ -287,55 +287,55 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           switch (operator) {
             // Text operators
             case 'contains':
-              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}%` });
+              filterParams.push({ name: `p${paramIndex}`, value: `%${String(value)}%` });
               condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
               break;
             case 'equals':
               // Use exact match for better performance
-              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: String(value) });
               condition = `${quotedColumn} = ${dialect.param(paramIndex)}`;
               break;
             case 'startsWith':
               // Index-friendly: LIKE 'value%'
-              filterParams.push({ name: `filter${paramIndex}`, value: `${String(value)}%` });
+              filterParams.push({ name: `p${paramIndex}`, value: `${String(value)}%` });
               condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
               break;
             case 'endsWith':
-              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}` });
+              filterParams.push({ name: `p${paramIndex}`, value: `%${String(value)}` });
               condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
               break;
             case 'notContains':
-              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}%` });
+              filterParams.push({ name: `p${paramIndex}`, value: `%${String(value)}%` });
               condition = `${quotedColumn} NOT LIKE ${dialect.param(paramIndex)}`;
               break;
             
             // Number operators
             case 'eq':
-              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
               condition = `${quotedColumn} = ${dialect.param(paramIndex)}`;
               break;
             case 'gt':
-              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
               condition = `${quotedColumn} > ${dialect.param(paramIndex)}`;
               break;
             case 'gte':
-              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
               condition = `${quotedColumn} >= ${dialect.param(paramIndex)}`;
               break;
             case 'lt':
-              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
               condition = `${quotedColumn} < ${dialect.param(paramIndex)}`;
               break;
             case 'lte':
-              filterParams.push({ name: `filter${paramIndex}`, value: Number(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: Number(value) });
               condition = `${quotedColumn} <= ${dialect.param(paramIndex)}`;
               break;
             case 'between':
               if (typeof value === 'object' && 'from' in value && 'to' in value) {
                 const fromParamIndex = paramIndex;
                 const toParamIndex = paramIndex + 1;
-                filterParams.push({ name: `filter${fromParamIndex}`, value: Number(value.from) });
-                filterParams.push({ name: `filter${toParamIndex}`, value: Number(value.to) });
+                filterParams.push({ name: `p${fromParamIndex}`, value: Number(value.from) });
+                filterParams.push({ name: `p${toParamIndex}`, value: Number(value.to) });
                 condition = `${quotedColumn} BETWEEN ${dialect.param(fromParamIndex)} AND ${dialect.param(toParamIndex)}`;
                 paramIndex++; // Extra increment for second param
               }
@@ -343,23 +343,23 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
             
             // Date operators
             case 'dateEq':
-              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: String(value) });
               condition = `${dialect.castToDate(quotedColumn)} = ${dialect.castToDate(dialect.param(paramIndex))}`;
               break;
             case 'dateAfter':
-              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: String(value) });
               condition = `${dialect.castToDate(quotedColumn)} > ${dialect.castToDate(dialect.param(paramIndex))}`;
               break;
             case 'dateBefore':
-              filterParams.push({ name: `filter${paramIndex}`, value: String(value) });
+              filterParams.push({ name: `p${paramIndex}`, value: String(value) });
               condition = `${dialect.castToDate(quotedColumn)} < ${dialect.castToDate(dialect.param(paramIndex))}`;
               break;
             case 'dateBetween':
               if (typeof value === 'object' && 'from' in value && 'to' in value) {
                 const fromParamIndex = paramIndex;
                 const toParamIndex = paramIndex + 1;
-                filterParams.push({ name: `filter${fromParamIndex}`, value: String(value.from) });
-                filterParams.push({ name: `filter${toParamIndex}`, value: String(value.to) });
+                filterParams.push({ name: `p${fromParamIndex}`, value: String(value.from) });
+                filterParams.push({ name: `p${toParamIndex}`, value: String(value.to) });
                 condition = `${dialect.castToDate(quotedColumn)} BETWEEN ${dialect.castToDate(dialect.param(fromParamIndex))} AND ${dialect.castToDate(dialect.param(toParamIndex))}`;
                 paramIndex++; // Extra increment for second param
               }
@@ -372,7 +372,7 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
                 const placeholders: string[] = [];
                 value.forEach((val, i) => {
                   const currentIndex = paramIndex + i;
-                  filterParams.push({ name: `filter${currentIndex}`, value: val });
+                  filterParams.push({ name: `p${currentIndex}`, value: val });
                   placeholders.push(dialect.param(currentIndex));
                 });
                 const inOperator = operator === 'in' ? 'IN' : 'NOT IN';
@@ -383,7 +383,7 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
             
             default:
               console.warn(`Unknown filter operator: ${operator}, falling back to contains`);
-              filterParams.push({ name: `filter${paramIndex}`, value: `%${String(value)}%` });
+              filterParams.push({ name: `p${paramIndex}`, value: `%${String(value)}%` });
               condition = `${quotedColumn} LIKE ${dialect.param(paramIndex)}`;
           }
           
@@ -432,9 +432,9 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           WHERE table_schema = ${dialect.param(1)} AND table_name = ${dialect.param(2)} AND column_name = ${dialect.param(3)}
         `;
         const validateResult = await executeQuery(validateQuery, [
-          { name: 'schema', value: schema },
-          { name: 'table', value: table },
-          { name: 'column', value: orderByColumn }
+          { name: 'p1', value: schema },
+          { name: 'p2', value: table },
+          { name: 'p3', value: orderByColumn }
         ]);
         if (validateResult.length === 0) {
           // Column doesn't exist in this table, reset to empty
@@ -461,8 +461,8 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
           ${!topClause ? dialect.limitOffset(0, 1) : ''}
         `;
         const structureResult = await executeQuery(structureQuery, [
-          { name: 'schema', value: schema },
-          { name: 'table', value: table }
+          { name: 'p1', value: schema },
+          { name: 'p2', value: table }
         ]);
         if (structureResult.length > 0) {
           orderByColumn = structureResult[0].column_name || structureResult[0].COLUMN_NAME;
@@ -508,8 +508,8 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
       
     console.log('Fetching foreign keys with query:', fkQuery);
     const foreignKeys = await executeQuery(fkQuery, [
-      { name: 'schema', value: schema },
-      { name: 'table', value: table }
+      { name: 'p1', value: schema },
+      { name: 'p2', value: table }
     ]);
     console.log(`Found ${foreignKeys.length} foreign key(s)`);
     
@@ -533,11 +533,11 @@ tableRoutes.get('/:schema/:table/data', async (req, res) => {
         ORDER BY table_schema, table_name, ordinal_position
       `;
       
-      const batchParams = uniqueRefTables.flatMap((tableRef) => {
+      const batchParams = uniqueRefTables.flatMap((tableRef, idx) => {
         const [refSchema, refTable] = tableRef.split('.');
         return [
-          { name: 'refSchema', value: refSchema },
-          { name: 'refTable', value: refTable }
+          { name: `p${idx * 2 + 1}`, value: refSchema },
+          { name: `p${idx * 2 + 2}`, value: refTable }
         ];
       });
       
@@ -831,8 +831,8 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
     `;
     
     const columns = await executeQuery(columnsQuery, [
-      { name: 'refSchema', value: referencedSchema },
-      { name: 'refTable', value: referencedTable }
+      { name: 'p1', value: referencedSchema },
+      { name: 'p2', value: referencedTable }
     ]);
     
     // Find the referenced column to get its data type
@@ -891,8 +891,8 @@ tableRoutes.post('/:schema/:table/related-data', async (req, res) => {
       WHERE ${quotedRefColumn} IN (${placeholders})
     `;
     
-    const params = ids.map((id: any) => ({
-      name: 'id',
+    const params = ids.map((id: any, idx: number) => ({
+      name: `p${idx + 1}`,
       value: id
     }));
     
@@ -969,9 +969,9 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
       WHERE c.table_schema = ${dialect.param(1)} AND c.table_name = ${dialect.param(2)} AND c.column_name = ${dialect.param(3)}
     `;
     const columnResult = await executeQuery(columnQuery, [
-      { name: 'schema', value: schema },
-      { name: 'table', value: table },
-      { name: 'column', value: column }
+      { name: 'p1', value: schema },
+      { name: 'p2', value: table },
+      { name: 'p3', value: column }
     ]);
     
     if (columnResult.length === 0) {
@@ -1011,7 +1011,7 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
         if (searchQuery && searchQuery.trim()) {
           const searchCols = columnsToSelect.map(col => `${dialect.quoteId(col)} LIKE ${dialect.param(1)}`).join(' OR ');
           query += ` WHERE (${searchCols}) AND ${quotedRefColumn} IS NOT NULL`;
-          params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
+          params.push({ name: 'p1', value: `%${searchQuery.trim()}%` });
         } else {
           query += ` WHERE ${quotedRefColumn} IS NOT NULL`;
         }
@@ -1028,8 +1028,8 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
           ORDER BY ordinal_position
         `;
         const refColumns = await executeQuery(refColumnsQuery, [
-          { name: 'refSchema', value: refSchema },
-          { name: 'refTable', value: refTable }
+          { name: 'p1', value: refSchema },
+          { name: 'p2', value: refTable }
         ]);
         
         // Find display column: prefer name, title, description, code, or first string column
@@ -1074,7 +1074,7 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
           } else {
             query += ` WHERE ${quotedRefColumn} LIKE ${dialect.param(1)}`;
           }
-          params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
+          params.push({ name: 'p1', value: `%${searchQuery.trim()}%` });
           query += ` AND ${quotedRefColumn} IS NOT NULL`;
         } else {
           query += ` WHERE ${quotedRefColumn} IS NOT NULL`;
@@ -1104,7 +1104,7 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
         if (searchQuery && searchQuery.trim()) {
           const searchCols = quotedColumns.map(col => `${dialect.tryCastToNVarChar(col)} LIKE ${dialect.param(1)}`).join(' OR ');
           query += ` WHERE (${searchCols}) AND ${keyColumn} IS NOT NULL`;
-          params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
+          params.push({ name: 'p1', value: `%${searchQuery.trim()}%` });
         } else {
           query += ` WHERE ${keyColumn} IS NOT NULL`;
         }
@@ -1118,7 +1118,7 @@ tableRoutes.get('/:schema/:table/distinct-values/:column', async (req, res) => {
         if (searchQuery && searchQuery.trim()) {
           if (['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'].some(t => dataType.includes(t))) {
             query += ` WHERE ${quotedColumn} LIKE ${dialect.param(1)}`;
-            params.push({ name: 'search', value: `%${searchQuery.trim()}%` });
+            params.push({ name: 'p1', value: `%${searchQuery.trim()}%` });
             query += ` AND ${quotedColumn} IS NOT NULL`;
           } else {
             query += ` WHERE ${quotedColumn} IS NOT NULL`;
