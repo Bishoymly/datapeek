@@ -17,7 +17,7 @@ import { formatName } from '@/lib/nameFormatter';
 import { getConnectionKey, type ConnectionInfo } from '@/lib/connectionState';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, Link2, MoreVertical, Plus } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, ArrowUpDown, GripVertical, Columns, ChevronUp, ChevronDown, ArrowUp, ArrowDown, EyeOff, FileText, Filter, X, Loader2, MoreVertical, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -44,6 +44,7 @@ interface DataGridProps {
   initialFilters?: FilterType[];
   onFiltersChange?: (filters: FilterType[]) => void;
   onOpenRelatedTable?: (schema: string, table: string, filters: FilterType[]) => void;
+  onRowSelected?: (row: Record<string, any> | null, primaryKeyColumns: string[]) => void;
 }
 
 const TABLE_CONFIG_STORAGE_KEY = 'datapeek_table_config';
@@ -274,6 +275,7 @@ export function DataGrid({
   initialFilters,
   onFiltersChange,
   onOpenRelatedTable,
+  onRowSelected,
 }: DataGridProps) {
   const connectionId = connectionInfo?.connectionId || null;
   const dbType = connectionInfo?.dbType || 'mssql';
@@ -293,7 +295,6 @@ export function DataGrid({
   const [structuredFilters, setStructuredFilters] = useState<FilterType[]>(initialFilters || []);
   const [selectedRowForMenu, setSelectedRowForMenu] = useState<{ row: Record<string, any>; position: { top: number; left: number }; rowIndex: number } | null>(null);
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
-  const expandButtonRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const [showColumnOptions, setShowColumnOptions] = useState<string | null>(null);
   const [columnOptionsPosition, setColumnOptionsPosition] = useState<{ top: number; left: number } | null>(null);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
@@ -369,6 +370,19 @@ export function DataGrid({
     }
   }, [schema, table, connectionId]);
 
+  // Persist default sort (first column) when no sort is saved and table structure is available
+  useEffect(() => {
+    if (!connectionId || !tableStructure || tableStructure.length === 0) return;
+    const savedSorting = getColumnSorting(schema, table, connectionId);
+    if (savedSorting.length > 0) return;
+    const firstColumn = tableStructure[0].columnName;
+    if (firstColumn) {
+      const defaultSort: SortingState = [{ id: firstColumn, desc: false }];
+      setSorting(defaultSort);
+      saveColumnSorting(schema, table, defaultSort, connectionId);
+    }
+  }, [schema, table, connectionId, tableStructure]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Save column sorting when it changes (debounced to avoid excessive writes)
   useEffect(() => {
     if (sorting.length > 0) {
@@ -405,7 +419,7 @@ export function DataGrid({
   });
 
   // Fetch table data first (needed for foreign key values extraction)
-  const { data, isLoading, error, isFetching } = useQuery<TableData>({
+  const { data, isLoading, error, isFetching, refetch } = useQuery<TableData>({
     queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, structuredFilters, fkDisplayMode],
     queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, structuredFilters.length > 0 ? structuredFilters : undefined, fkDisplayMode),
     enabled: !!schema && !!table,
@@ -471,6 +485,27 @@ export function DataGrid({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data?.query]);
+
+  // Notify parent when a single row is selected (for related tables tabs)
+  useEffect(() => {
+    if (!onRowSelected) return;
+    if (
+      selection &&
+      selection.startRow === selection.endRow &&
+      selection.selectionType === 'row' &&
+      data?.data &&
+      primaryKeyColumns.length > 0
+    ) {
+      const row = data.data[selection.startRow];
+      if (row) {
+        onRowSelected(row, primaryKeyColumns);
+      } else {
+        onRowSelected(null, []);
+      }
+    } else {
+      onRowSelected(null, []);
+    }
+  }, [selection, data?.data, primaryKeyColumns, onRowSelected]);
 
   // Get default column order from data
   const defaultColumnOrder = useMemo(() => {
@@ -976,29 +1011,18 @@ export function DataGrid({
     });
   }, [visibleColumnIds]);
 
-  // Handle expand button click (plus icon)
-  const handleExpandClick = useCallback((e: React.MouseEvent, rowIndex: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    
+  // Handle row right-click to show related tables menu
+  const handleRowContextMenu = useCallback((e: React.MouseEvent, rowIndex: number) => {
     if (!data?.data || rowIndex < 0 || rowIndex >= data.data.length || primaryKeyColumns.length === 0 || !onOpenRelatedTable) {
       return;
     }
-
+    e.preventDefault();
     const row = data.data[rowIndex];
-    const expandButton = expandButtonRefs.current.get(rowIndex);
-    
-    if (expandButton) {
-      const rect = expandButton.getBoundingClientRect();
-      setSelectedRowForMenu({
-        row,
-        position: {
-          top: rect.bottom + 4,
-          left: rect.left,
-        },
-        rowIndex,
-      });
-    }
+    setSelectedRowForMenu({
+      row,
+      position: { top: e.clientY, left: e.clientX },
+      rowIndex,
+    });
   }, [data?.data, primaryKeyColumns, onOpenRelatedTable]);
 
   // Handle select all header click
@@ -1258,7 +1282,7 @@ export function DataGrid({
 
     const handleClickOutside = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest('[data-related-menu]') && !target.closest('[data-expand-button]')) {
+      if (!target.closest('[data-related-menu]')) {
         setSelectedRowForMenu(null);
       }
     };
@@ -1359,6 +1383,17 @@ export function DataGrid({
             </ul>
           </div>
         )}
+        <Button
+          variant="outline"
+          size="sm"
+          className="mt-4"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          title="Retry"
+        >
+          <RefreshCw className={cn("h-3 w-3 mr-1.5", isFetching && "animate-spin")} />
+          Retry
+        </Button>
       </div>
     );
   }
@@ -1373,17 +1408,28 @@ export function DataGrid({
             <div className="text-sm text-muted-foreground flex items-center gap-2">
               Showing 0 of 0 rows
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              title="Refresh data"
+            >
+              <RefreshCw className={cn("h-3 w-3 mr-1.5", isFetching && "animate-spin")} />
+              Refresh
+            </Button>
           </div>
           <div className="flex-1 overflow-auto">
             <table className="w-full border-collapse">
-              <thead className="sticky top-0 bg-muted z-10">
+              <thead className="sticky top-0 z-10 bg-muted [&_th]:bg-muted [&_th]:border-b-2 [&_th]:border-border">
                 <tr>
-                  <th className="border-b border-r border-border/50 p-2 text-xs font-medium text-muted-foreground select-none bg-muted/30 w-12 text-center">
+                  <th className="sticky left-0 z-20 border-r-2 border-border px-4 text-xs font-medium text-muted-foreground select-none bg-muted aspect-square text-center">
                   </th>
                   {columnNames.map((colName) => (
                     <th
                       key={colName}
-                      className="border-b border-r border-border/50 p-2 text-left text-xs font-medium text-muted-foreground last:border-r-0"
+                      className="border-r border-border p-2 text-left text-xs font-medium text-muted-foreground last:border-r-0"
                     >
                       {formatName(colName, nameDisplayMode)}
                     </th>
@@ -1417,8 +1463,8 @@ export function DataGrid({
           <div className="text-sm text-muted-foreground flex items-center gap-2">
             {data ? (
               <>
-                Showing {((page - 1) * pageSize) + 1} - {Math.min(page * pageSize, data.pagination.total)} of{' '}
-                {data.pagination.total} rows
+                Showing {(((page - 1) * pageSize) + 1).toLocaleString()} - {Math.min(page * pageSize, data.pagination.total).toLocaleString()} of{' '}
+                {data.pagination.total.toLocaleString()} rows
               </>
             ) : (
               <span>Loading...</span>
@@ -1428,6 +1474,17 @@ export function DataGrid({
             )}
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() => refetch()}
+              disabled={isFetching}
+              title="Refresh data"
+            >
+              <RefreshCw className={cn("h-3 w-3 mr-1.5", isFetching && "animate-spin")} />
+              Refresh
+            </Button>
             {onCreateQuery && (
               <Button 
                 variant="outline" 
@@ -1621,12 +1678,12 @@ export function DataGrid({
           </div>
         )}
         <table className="w-full border-collapse">
-          <thead className="sticky top-0 bg-muted z-10">
+          <thead className="sticky top-0 z-10 bg-muted [&_th]:bg-muted [&_th]:border-b-2 [&_th]:border-border">
             {tableInstance.getHeaderGroups().map((headerGroup) => (
               <tr key={headerGroup.id}>
                 {/* Row number header - Select All */}
                 <th
-                  className="border-b border-r border-border/50 p-2 text-xs font-medium text-muted-foreground select-none bg-muted/50 w-12 cursor-pointer hover:bg-muted/70 transition-colors"
+                  className="sticky left-0 z-20 border-r-2 border-border px-4 text-xs font-medium text-muted-foreground select-none bg-muted aspect-square cursor-pointer hover:bg-accent transition-colors"
                   onMouseDown={handleSelectAllClick}
                   title="Select All"
                 >
@@ -1673,8 +1730,8 @@ export function DataGrid({
                         setDragOverColumn(null);
                       }}
                       className={cn(
-                        "relative border-b border-r border-border/50 p-2 text-left text-xs font-medium text-muted-foreground last:border-r-0 select-none cursor-pointer group",
-                        isColSelected && "bg-primary/20",
+                        "relative border-r border-border p-2 text-left text-xs font-medium text-muted-foreground last:border-r-0 select-none cursor-pointer group bg-muted",
+                        isColSelected && "bg-accent",
                         draggedColumn === columnId && "opacity-50",
                         dragOverColumn === columnId && "border-l-2 border-primary"
                       )}
@@ -1693,7 +1750,6 @@ export function DataGrid({
           <tbody>
             {tableInstance.getRowModel().rows.map((row, rowIndex) => {
               const rowIsSelected = isRowSelected(rowIndex);
-              const actualRowNumber = ((page - 1) * pageSize) + rowIndex + 1;
               
               return (
                 <tr
@@ -1706,43 +1762,19 @@ export function DataGrid({
                     }
                   }}
                   className="border-b hover:bg-muted/30 transition-colors group"
+                  onContextMenu={(e) => handleRowContextMenu(e, rowIndex)}
                 >
-                  {/* Row number cell with expand button */}
+                  {/* Row selection cell - right-click for related tables */}
                   <td
                     className={cn(
-                      "border-r border-border/50 p-2 text-xs text-muted-foreground select-none bg-muted/30 w-12",
-                      rowIsSelected && "bg-primary/20"
+                      "sticky left-0 z-10 border-r-2 border-border px-4 text-xs text-muted-foreground select-none aspect-square cursor-pointer",
+                      rowIsSelected ? "bg-accent" : "bg-muted"
                     )}
+                    onMouseDown={(e) => handleRowHeaderClick(e, rowIndex)}
+                    onMouseEnter={() => handleRowHeaderMouseEnter(rowIndex)}
+                    title="Select row · Right-click for related tables"
                   >
-                    <div className="flex items-center justify-center gap-1">
-                      {primaryKeyColumns.length > 0 && onOpenRelatedTable && (
-                        <button
-                          data-expand-button
-                          ref={(el) => {
-                            if (el) {
-                              expandButtonRefs.current.set(rowIndex, el);
-                            } else {
-                              expandButtonRefs.current.delete(rowIndex);
-                            }
-                          }}
-                          onClick={(e) => handleExpandClick(e, rowIndex)}
-                          className="p-0.5 rounded hover:bg-accent transition-colors opacity-0 group-hover:opacity-100"
-                          title="Show related tables"
-                        >
-                          <Plus className="h-3 w-3" />
-                        </button>
-                      )}
-                      <span
-                        className={cn(
-                          "cursor-pointer flex-1 text-center",
-                          primaryKeyColumns.length > 0 && onOpenRelatedTable && "group-hover:ml-0"
-                        )}
-                        onMouseDown={(e) => handleRowHeaderClick(e, rowIndex)}
-                        onMouseEnter={() => handleRowHeaderMouseEnter(rowIndex)}
-                      >
-                        {actualRowNumber}
-                      </span>
-                    </div>
+                    {'\u00A0'}
                   </td>
                   {row.getVisibleCells().map((cell) => {
                     const columnId = cell.column.id || String(cell.column.accessorKey);
@@ -1871,7 +1903,7 @@ export function DataGrid({
       <div className="border-t p-2 flex items-center justify-between bg-muted/30">
         <div className="text-xs text-muted-foreground">
           {data ? (
-            <>Page {page} of {data.pagination.totalPages}</>
+            <>Page {page.toLocaleString()} of {data.pagination.totalPages.toLocaleString()}</>
           ) : (
             <>Loading...</>
           )}

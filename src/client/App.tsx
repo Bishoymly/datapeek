@@ -10,6 +10,7 @@ import { getNameDisplayMode, saveNameDisplayMode, formatName } from './lib/nameF
 import { getConnectionId, getConnectionKey, type ConnectionInfo } from './lib/connectionState';
 import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag, Link2 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
+import { useRelatedTables } from './hooks/useRelatedTables';
 import { Button } from './components/ui/button';
 import { ThemeToggle } from './components/ThemeToggle';
 import { cn } from './lib/utils';
@@ -83,9 +84,27 @@ function AppContent() {
   };
 
   const [fkDisplayMode, setFkDisplayMode] = useState<'key-only' | 'key-display' | 'display-only'>(() => getGlobalFkDisplayMode());
-  
+  const [selectedRowForRelatedTabs, setSelectedRowForRelatedTabs] = useState<{
+    row: Record<string, any>;
+    primaryKeyColumns: string[];
+  } | null>(null);
+
   // Legacy selectedTable for backward compatibility with Sidebar
   const selectedTable = activeTabId ? tableTabs.find(t => t.id === activeTabId) : undefined;
+
+  // Fetch related tables when a row is selected (for tabs in header)
+  const { relatedTables, isLoading: loadingRelatedTables } = useRelatedTables(
+    selectedTable?.schema ?? '',
+    selectedTable?.table ?? '',
+    selectedRowForRelatedTabs?.row ?? null,
+    selectedRowForRelatedTabs?.primaryKeyColumns ?? [],
+    !!selectedTable && !!selectedRowForRelatedTabs && view === 'table'
+  );
+
+  // Clear related tabs when switching tabs
+  useEffect(() => {
+    setSelectedRowForRelatedTabs(null);
+  }, [activeTabId]);
   
   // Update name display mode when connection changes
   useEffect(() => {
@@ -117,6 +136,7 @@ function AppContent() {
 
   // Tab management functions
   const openTableTab = (schema: string, table: string, filters?: Filter[], title?: string) => {
+    setSelectedRowForRelatedTabs(null);
     const tabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const newTab: TableTab = {
       id: tabId,
@@ -847,6 +867,7 @@ function AppContent() {
               selectedQuery={selectedQuery}
               queriesUpdated={queriesUpdated}
               favoritesUpdated={favoritesUpdated}
+              onFavoritesChange={() => setFavoritesUpdated(Date.now())}
               nameDisplayMode={nameDisplayMode}
               connected={connected}
               connectionInfo={connectionInfo}
@@ -945,9 +966,26 @@ function AppContent() {
                       </div>
                     );
                   })}
+                  {/* Related tables tabs - shown when a row is selected */}
+                  {relatedTables.map((rt) => (
+                    <div
+                      key={`related-${rt.schema}.${rt.table}`}
+                      className="flex items-center gap-1.5 px-3 py-2 border-r border-border cursor-pointer bg-muted/30 dark:bg-muted/20 hover:bg-accent/50 transition-colors"
+                      onClick={() => openTableTab(rt.schema, rt.table, rt.filters)}
+                      title={`Open ${formatName(rt.table, nameDisplayMode)} (${rt.count.toLocaleString()} rows)`}
+                    >
+                      <Link2 className="h-3 w-3 text-muted-foreground shrink-0" />
+                      <span className="text-sm font-medium whitespace-nowrap">
+                        {formatName(rt.table, nameDisplayMode)}
+                      </span>
+                      <span className="text-xs text-muted-foreground tabular-nums">
+                        {loadingRelatedTables ? '...' : rt.hasError ? '?' : rt.count.toLocaleString()}
+                      </span>
+                    </div>
+                  ))}
                 </div>
                 {selectedTable && (
-                  <div className="flex items-center gap-1 px-4 py-2 border-l border-border">
+                  <div className="flex items-center gap-1 px-4 py-2 border-l border-border shrink-0">
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1030,6 +1068,9 @@ function AppContent() {
                     }}
                     onOpenRelatedTable={(schema, table, filters) => {
                       openTableTab(schema, table, filters);
+                    }}
+                    onRowSelected={(row, primaryKeyColumns) => {
+                      setSelectedRowForRelatedTabs(row ? { row, primaryKeyColumns } : null);
                     }}
                   />
                 ) : (

@@ -14,6 +14,7 @@ interface SidebarProps {
   selectedQuery?: string;
   queriesUpdated?: number; // Timestamp to trigger refresh
   favoritesUpdated?: number; // Timestamp to trigger refresh
+  onFavoritesChange?: () => void; // Notify parent when favorites change (for header Star sync)
   nameDisplayMode?: 'database-names' | 'friendly-names';
   connected?: boolean;
   connectionInfo?: ConnectionInfo | null;
@@ -147,6 +148,7 @@ export function Sidebar({
   selectedQuery,
   queriesUpdated,
   favoritesUpdated,
+  onFavoritesChange,
   nameDisplayMode = 'database-names',
   connected = false,
   connectionInfo,
@@ -285,7 +287,8 @@ export function Sidebar({
     
     setFavorites(newFavorites);
     saveFavorites(newFavorites, connectionId);
-  }, [favorites, connectionId]);
+    onFavoritesChange?.();
+  }, [favorites, connectionId, onFavoritesChange]);
 
   const moveFavorite = useCallback((index: number, direction: 'up' | 'down') => {
     if (!connectionId) return;
@@ -296,8 +299,9 @@ export function Sidebar({
       [newFavorites[index], newFavorites[newIndex]] = [newFavorites[newIndex], newFavorites[index]];
       setFavorites(newFavorites);
       saveFavorites(newFavorites, connectionId);
+      onFavoritesChange?.();
     }
-  }, [favorites, connectionId]);
+  }, [favorites, connectionId, onFavoritesChange]);
 
   // Get favorite tables with full table info
   const favoriteTables = favorites
