@@ -370,19 +370,6 @@ export function DataGrid({
     }
   }, [schema, table, connectionId]);
 
-  // Persist default sort (first column) when no sort is saved and table structure is available
-  useEffect(() => {
-    if (!connectionId || !tableStructure || tableStructure.length === 0) return;
-    const savedSorting = getColumnSorting(schema, table, connectionId);
-    if (savedSorting.length > 0) return;
-    const firstColumn = tableStructure[0].columnName;
-    if (firstColumn) {
-      const defaultSort: SortingState = [{ id: firstColumn, desc: false }];
-      setSorting(defaultSort);
-      saveColumnSorting(schema, table, defaultSort, connectionId);
-    }
-  }, [schema, table, connectionId, tableStructure]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // Save column sorting when it changes (debounced to avoid excessive writes)
   useEffect(() => {
     if (sorting.length > 0) {
@@ -417,6 +404,19 @@ export function DataGrid({
     queryFn: () => api.getTableStructure(schema, table),
     enabled: !!schema && !!table,
   });
+
+  // Persist default sort (first column) when no sort is saved and table structure is available
+  useEffect(() => {
+    if (!connectionId || !tableStructure || tableStructure.length === 0) return;
+    const savedSorting = getColumnSorting(schema, table, connectionId);
+    if (savedSorting.length > 0) return;
+    const firstColumn = tableStructure[0].columnName;
+    if (firstColumn) {
+      const defaultSort: SortingState = [{ id: firstColumn, desc: false }];
+      setSorting(defaultSort);
+      saveColumnSorting(schema, table, defaultSort, connectionId);
+    }
+  }, [schema, table, connectionId, tableStructure]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch table data first (needed for foreign key values extraction)
   const { data, isLoading, error, isFetching, refetch } = useQuery<TableData>({

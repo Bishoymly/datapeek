@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { testConnection, connect, disconnect, setDbType, getConnection, executeQuery, getDialect } from '../db/index.js';
+import { testConnection, connect, disconnect, setDbType, getConnection, getConnectionConfig, executeQuery, getDialect, parseConnectionString } from '../db/index.js';
 import { getProvidedConnectionString } from '../index.js';
 
 export const connectionRoutes = Router();
@@ -119,7 +119,28 @@ connectionRoutes.get('/status', async (req, res) => {
           const dialect = getDialect();
           const result = await executeQuery(dialect.currentDbQuery());
           const databaseName = result[0]?.databaseName || null;
-          res.json({ connected: true, databaseName });
+          let connConfig = getConnectionConfig();
+          // Fallback: when connected but connConfig is null (e.g. server restarted, module reload),
+          // derive from provided connection string if it matches the current database
+          if (!connConfig && databaseName) {
+            const connString = getProvidedConnectionString();
+            if (connString) {
+              try {
+                const parsed = parseConnectionString(connString);
+                if (parsed.server && parsed.database && parsed.database.toLowerCase() === databaseName.toLowerCase()) {
+                  const dbType = connString.trim().startsWith('postgresql://') || connString.trim().startsWith('postgres://') ? 'postgres' : 'mssql';
+                  connConfig = { server: parsed.server, database: parsed.database, dbType };
+                }
+              } catch {
+                // Ignore parse errors
+              }
+            }
+          }
+          res.json({
+            connected: true,
+            databaseName,
+            ...(connConfig && { server: connConfig.server, database: connConfig.database, dbType: connConfig.dbType }),
+          });
         } catch (error: any) {
           // If query fails, connection is not actually working
           // Check if it's an authentication error

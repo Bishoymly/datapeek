@@ -468,6 +468,26 @@ function AppContent() {
         } else {
           setDatabaseName('');
         }
+        // Restore connectionInfo from server when we have it (fixes favorites/default sort when client lost state)
+        if (connectionStatus.server && connectionStatus.database && connectionStatus.dbType) {
+          const connectionId = getConnectionId({
+            server: connectionStatus.server,
+            database: connectionStatus.database,
+            dbType: connectionStatus.dbType,
+          });
+          if (connectionId) {
+            setConnectionInfo((prev) =>
+              prev?.connectionId === connectionId
+                ? prev
+                : {
+                    server: connectionStatus.server!,
+                    database: connectionStatus.database!,
+                    dbType: connectionStatus.dbType!,
+                    connectionId,
+                  }
+            );
+          }
+        }
       } else {
         // Connection lost - clear connection info
         setConnectionInfo(null);
@@ -497,25 +517,41 @@ function AppContent() {
         setConnected(true);
         setShowConnectionDialog(false);
         setIsAutoConnecting(false);
-        // Try to restore connection info from recent connections
-        const recentConnections = localStorage.getItem('datapeek_recent_connections');
-        if (recentConnections) {
-          try {
-            const recent = JSON.parse(recentConnections);
-            if (recent.length > 0) {
-              const lastConnection = recent[0];
-              const connectionId = getConnectionId(lastConnection);
-              if (connectionId && status.databaseName === lastConnection.database) {
-                setConnectionInfo({
-                  server: lastConnection.server,
-                  database: lastConnection.database,
-                  dbType: lastConnection.dbType || 'mssql',
-                  connectionId,
-                });
+        // Restore connectionInfo: prefer server response, fallback to recent connections
+        if (status.server && status.database && status.dbType) {
+          const connectionId = getConnectionId({
+            server: status.server,
+            database: status.database,
+            dbType: status.dbType,
+          });
+          if (connectionId) {
+            setConnectionInfo({
+              server: status.server,
+              database: status.database,
+              dbType: status.dbType,
+              connectionId,
+            });
+          }
+        } else {
+          const recentConnections = localStorage.getItem('datapeek_recent_connections');
+          if (recentConnections) {
+            try {
+              const recent = JSON.parse(recentConnections);
+              if (recent.length > 0) {
+                const lastConnection = recent[0];
+                const connectionId = getConnectionId(lastConnection);
+                if (connectionId && status.databaseName === lastConnection.database) {
+                  setConnectionInfo({
+                    server: lastConnection.server,
+                    database: lastConnection.database,
+                    dbType: lastConnection.dbType || 'mssql',
+                    connectionId,
+                  });
+                }
               }
+            } catch (e) {
+              // Ignore parse errors
             }
-          } catch (e) {
-            // Ignore parse errors
           }
         }
       } else {
@@ -647,6 +683,22 @@ function AppContent() {
               dbType: config.dbType || 'mssql',
               connectionId,
             });
+            // Save to recent connections so we can restore connectionInfo on page reload
+            try {
+              const recentKey = 'datapeek_recent_connections';
+              const stored = localStorage.getItem(recentKey);
+              const recent = stored ? JSON.parse(stored) : [];
+              const updated = [
+                { ...config, dbType: config.dbType || 'mssql' },
+                ...recent.filter(
+                  (c: ConnectionConfig) =>
+                    !(c.server === config.server && c.database === config.database && (c.dbType || 'mssql') === (config.dbType || 'mssql'))
+                ),
+              ].slice(0, 5);
+              localStorage.setItem(recentKey, JSON.stringify(updated));
+            } catch (e) {
+              // Ignore storage errors
+            }
           }
         } else {
           throw new Error(result.message || 'Connection failed');

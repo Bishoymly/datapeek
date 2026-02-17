@@ -5,6 +5,9 @@ export type DbType = 'mssql' | 'postgres';
 
 let currentDbType: DbType = 'mssql';
 
+/** Stored when connect() succeeds - used to return connection info in status API */
+let currentConnectionConfig: { server: string; database: string; dbType: DbType } | null = null;
+
 export interface ConnectionConfig {
   server: string;
   database: string;
@@ -128,24 +131,38 @@ export async function testConnection(config: ConnectionConfig | string): Promise
 }
 
 export async function connect(config: ConnectionConfig | string): Promise<void> {
+  const connectionConfig = typeof config === 'string' ? parseConnectionString(config) : config;
+  const dbType = typeof config === 'string' ? detectDbType(config) : (config.dbType as DbType) || currentDbType;
+
   if (typeof config === 'string') {
-    const dbType = detectDbType(config);
     setDbType(dbType);
     if (dbType === 'postgres') {
-      return postgres.connect(config);
+      await postgres.connect(config);
     } else {
-      return mssql.connect(config);
+      await mssql.connect(config);
     }
   } else {
+    if (config.dbType) setDbType(config.dbType as DbType);
     if (currentDbType === 'postgres') {
-      return postgres.connect(config);
+      await postgres.connect(config);
     } else {
-      return mssql.connect(config);
+      await mssql.connect(config);
     }
   }
+
+  currentConnectionConfig = {
+    server: connectionConfig.server,
+    database: connectionConfig.database,
+    dbType: currentDbType,
+  };
+}
+
+export function getConnectionConfig(): { server: string; database: string; dbType: DbType } | null {
+  return currentConnectionConfig;
 }
 
 export async function disconnect(): Promise<void> {
+  currentConnectionConfig = null;
   if (currentDbType === 'postgres') {
     return postgres.disconnect();
   } else {

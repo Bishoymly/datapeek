@@ -74,7 +74,13 @@ export const api = {
     await fetch(`${API_BASE}/connect`, { method: 'DELETE' });
   },
 
-  async getConnectionStatus(): Promise<{ connected: boolean; databaseName?: string }> {
+  async getConnectionStatus(): Promise<{
+    connected: boolean;
+    databaseName?: string;
+    server?: string;
+    database?: string;
+    dbType?: 'mssql' | 'postgres';
+  }> {
     try {
       const res = await fetch(`${API_BASE}/connect/status`);
       return res.json();

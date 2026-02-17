@@ -356,31 +356,34 @@ export function Sidebar({
               {error instanceof Error ? error.message : 'Unknown error'}
             </div>
           </div>
-        ) : filteredSchemas.length === 0 && filteredFavorites.length === 0 ? (
+        ) : filteredSchemas.length === 0 && favorites.length === 0 ? (
           <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
             {searchQuery ? 'No tables found' : 'No tables'}
           </div>
         ) : (
           <div className="space-y-1">
             {/* Favorites Section */}
-            {favorites.length > 0 && (
-              <div className="space-y-0.5 mb-2">
-                <button
-                  onClick={() => toggleSchema('Favorites')}
-                  className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm font-medium hover:bg-accent transition-colors"
-                >
-                  {expandedSchemas.has('Favorites') ? (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  )}
-                  <span className="flex-1 truncate">Favorites</span>
-                  <span className="text-xs text-muted-foreground">{filteredFavorites.length}</span>
-                </button>
+            <div className="space-y-0.5 mb-2">
+              <button
+                onClick={() => toggleSchema('Favorites')}
+                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm font-medium hover:bg-accent transition-colors"
+              >
+                {expandedSchemas.has('Favorites') ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
+                <span className="flex-1 truncate">Favorites</span>
+                <span className="text-xs text-muted-foreground">{filteredFavorites.length}</span>
+              </button>
 
-                {expandedSchemas.has('Favorites') && (
-                  <div className="ml-4 space-y-0.5">
-                    {filteredFavorites.map((fav) => {
+              {expandedSchemas.has('Favorites') && (
+                <div className="ml-4 space-y-0.5">
+                  {filteredFavorites.length === 0 ? (
+                    <div className="py-2 px-1 text-xs text-muted-foreground">
+                      No favorites yet. Click the star in the header when viewing a table to add it.
+                    </div>
+                  ) : filteredFavorites.map((fav) => {
                       const isSelected =
                         selectedTable?.schema === fav.schema &&
                         selectedTable?.table === fav.tableInfo.tableName;
@@ -413,10 +416,9 @@ export function Sidebar({
                         </div>
                       );
                     })}
-                  </div>
-                )}
-              </div>
-            )}
+                </div>
+              )}
+            </div>
 
             {/* Queries Section */}
             <div className="space-y-0.5 mb-2">
