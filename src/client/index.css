@@ -54,7 +54,8 @@
     --accent-foreground: 210 40% 98%;
     --destructive: 0 70% 55%;
     --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
+    /* More visible borders - neutral gray at ~20% lightness (VS Code/GitHub-style) */
+    --border: 220 13% 20%;
     --input: 217.2 32.6% 17.5%;
     --ring: 212.7 26.8% 83.9%;
     --chart-1: 220 70% 50%;
@@ -62,11 +63,11 @@
     --chart-3: 30 80% 55%;
     --chart-4: 280 65% 60%;
     --chart-5: 340 75% 55%;
-    /* Panel-specific backgrounds for dark theme */
-    --header-bg: 222.2 84% 6.5%;
-    --sidebar-bg: 222.2 84% 5.5%;
+    /* Panel-specific backgrounds - elevated hierarchy like VS Code/Slack */
+    --header-bg: 222.2 47% 9%;
+    --sidebar-bg: 222.2 47% 7%;
     --content-bg: 222.2 84% 4.9%;
-    --tabs-bg: 222.2 84% 5.2%;
+    --tabs-bg: 222.2 47% 8%;
     --grid-bg: 222.2 84% 5.0%;
   }
 }
