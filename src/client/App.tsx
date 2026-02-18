@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConnectionDialog } from './components/ConnectionDialog';
 import { Sidebar } from './components/Sidebar';
-import { DataGrid } from './components/DataGrid';
+import { DataGrid, type CellSelection } from './components/DataGrid';
 import { QueryEditor } from './components/QueryEditor';
 import { QueryEditorEnhanced } from './components/QueryEditorEnhanced';
 import { api, type ConnectionConfig, type Filter } from './lib/api';
@@ -88,6 +88,14 @@ function AppContent() {
     row: Record<string, any>;
     primaryKeyColumns: string[];
   } | null>(null);
+  const [selectedCellParentLink, setSelectedCellParentLink] = useState<{
+    schema: string;
+    table: string;
+    filters: Filter[];
+  } | null>(null);
+  const [tabSelections, setTabSelections] = useState<Record<string, CellSelection | null>>({});
+  const [closingTabIds, setClosingTabIds] = useState<Set<string>>(new Set());
+  const [newlyAddedTabIds, setNewlyAddedTabIds] = useState<Set<string>>(new Set());
 
   // Legacy selectedTable for backward compatibility with Sidebar
   const selectedTable = activeTabId ? tableTabs.find(t => t.id === activeTabId) : undefined;
@@ -101,9 +109,10 @@ function AppContent() {
     !!selectedTable && !!selectedRowForRelatedTabs && view === 'table'
   );
 
-  // Clear related tabs when switching tabs
+  // Clear related tabs and parent link when switching tabs
   useEffect(() => {
     setSelectedRowForRelatedTabs(null);
+    setSelectedCellParentLink(null);
   }, [activeTabId]);
   
   // Update name display mode when connection changes
@@ -137,6 +146,7 @@ function AppContent() {
   // Tab management functions
   const openTableTab = (schema: string, table: string, filters?: Filter[], title?: string) => {
     setSelectedRowForRelatedTabs(null);
+    setSelectedCellParentLink(null);
     const tabId = `tab-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const newTab: TableTab = {
       id: tabId,
@@ -146,30 +156,48 @@ function AppContent() {
       title,
     };
     setTableTabs(prev => [...prev, newTab]);
+    setNewlyAddedTabIds(prev => new Set(prev).add(tabId));
     setActiveTabId(tabId);
     setView('table');
     setSelectedQuery(undefined);
   };
 
+  // Clear newly-added state after enter animation completes
+  useEffect(() => {
+    if (newlyAddedTabIds.size === 0) return;
+    const timer = setTimeout(() => setNewlyAddedTabIds(new Set()), 250);
+    return () => clearTimeout(timer);
+  }, [newlyAddedTabIds]);
+
   const closeTableTab = (tabId: string) => {
-    setTableTabs(prev => {
-      const newTabs = prev.filter(t => t.id !== tabId);
-      if (activeTabId === tabId) {
-        // If closing active tab, switch to another tab or clear
-        if (newTabs.length > 0) {
-          setActiveTabId(newTabs[newTabs.length - 1].id);
-        } else {
-          setActiveTabId(undefined);
-        }
+    setClosingTabIds(prev => new Set(prev).add(tabId));
+    if (activeTabId === tabId) {
+      const remaining = tableTabs.filter(t => t.id !== tabId);
+      if (remaining.length > 0) {
+        setActiveTabId(remaining[remaining.length - 1].id);
+      } else {
+        setActiveTabId(undefined);
       }
-      return newTabs;
-    });
-    // Clean up query state for this tab
-    setTableQueries(prev => {
-      const newQueries = { ...prev };
-      delete newQueries[tabId];
-      return newQueries;
-    });
+    }
+    const TAB_EXIT_DURATION = 200;
+    setTimeout(() => {
+      setTableTabs(prev => prev.filter(t => t.id !== tabId));
+      setClosingTabIds(prev => {
+        const next = new Set(prev);
+        next.delete(tabId);
+        return next;
+      });
+      setTableQueries(prev => {
+        const newQueries = { ...prev };
+        delete newQueries[tabId];
+        return newQueries;
+      });
+      setTabSelections(prev => {
+        const next = { ...prev };
+        delete next[tabId];
+        return next;
+      });
+    }, TAB_EXIT_DURATION);
   };
 
   const updateTabFilters = (tabId: string, filters: Filter[]) => {
@@ -988,21 +1016,25 @@ function AppContent() {
                 )}
               </div>
             ) : tableTabs.length > 0 ? (
-              <div className="border-b flex items-center bg-tabs-bg dark:bg-tabs-bg overflow-x-auto">
+              <div className="border-b flex items-center bg-tabs-bg dark:bg-tabs-bg overflow-x-auto overflow-y-hidden">
                 <div className="flex items-center flex-1 min-w-0">
                   {tableTabs.map((tab) => {
                     const isActive = tab.id === activeTabId;
+                    const isClosing = closingTabIds.has(tab.id);
+                    const isNew = newlyAddedTabIds.has(tab.id);
                     const tabTitle = tab.title || `${formatName(tab.schema, nameDisplayMode)}.${formatName(tab.table, nameDisplayMode)}`;
                     return (
                       <div
                         key={tab.id}
                         className={cn(
-                          "flex items-center gap-1 px-3 py-2 border-r border-border cursor-pointer group",
+                          "flex items-center gap-1 px-3 py-2 border-r border-border cursor-pointer group shrink-0",
                           isActive 
                             ? "bg-background -mb-px relative z-10" 
-                            : "border-b border-border bg-muted/50 dark:bg-muted/40"
+                            : "border-b border-border bg-muted/50 dark:bg-muted/40",
+                          isClosing && "animate-tab-exit pointer-events-none",
+                          isNew && !isClosing && "animate-tab-enter"
                         )}
-                        onClick={() => setActiveTabId(tab.id)}
+                        onClick={() => !isClosing && setActiveTabId(tab.id)}
                       >
                         <span className="text-sm font-medium whitespace-nowrap">{tabTitle}</span>
                         <button
@@ -1018,11 +1050,24 @@ function AppContent() {
                       </div>
                     );
                   })}
+                  {/* Parent table link - shown when an FK cell is selected */}
+                  {selectedCellParentLink && (
+                    <div
+                      className="flex items-center gap-1.5 px-3 py-2 border-r border-border cursor-pointer bg-muted/30 dark:bg-muted/20 hover:bg-accent/50 transition-colors shrink-0 animate-tab-enter"
+                      onClick={() => openTableTab(selectedCellParentLink.schema, selectedCellParentLink.table, selectedCellParentLink.filters)}
+                      title={`Open parent row in ${formatName(selectedCellParentLink.table, nameDisplayMode)}`}
+                    >
+                      <Link2 className="h-3 w-3 text-muted-foreground shrink-0" />
+                      <span className="text-sm font-medium whitespace-nowrap">
+                        {formatName(selectedCellParentLink.table, nameDisplayMode)} →
+                      </span>
+                    </div>
+                  )}
                   {/* Related tables tabs - shown when a row is selected */}
                   {relatedTables.map((rt) => (
                     <div
                       key={`related-${rt.schema}.${rt.table}`}
-                      className="flex items-center gap-1.5 px-3 py-2 border-r border-border cursor-pointer bg-muted/30 dark:bg-muted/20 hover:bg-accent/50 transition-colors"
+                      className="flex items-center gap-1.5 px-3 py-2 border-r border-border cursor-pointer bg-muted/30 dark:bg-muted/20 hover:bg-accent/50 transition-colors shrink-0 animate-tab-enter"
                       onClick={() => openTableTab(rt.schema, rt.table, rt.filters)}
                       title={`Open ${formatName(rt.table, nameDisplayMode)} (${rt.count.toLocaleString()} rows)`}
                     >
@@ -1123,6 +1168,15 @@ function AppContent() {
                     }}
                     onRowSelected={(row, primaryKeyColumns) => {
                       setSelectedRowForRelatedTabs(row ? { row, primaryKeyColumns } : null);
+                    }}
+                    onForeignKeyCellSelected={(parent) => {
+                      setSelectedCellParentLink(parent);
+                    }}
+                    initialSelection={activeTabId ? tabSelections[activeTabId] ?? null : null}
+                    onSelectionChange={(sel) => {
+                      if (activeTabId) {
+                        setTabSelections(prev => ({ ...prev, [activeTabId]: sel }));
+                      }
                     }}
                   />
                 ) : (

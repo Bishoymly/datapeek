@@ -85,3 +85,41 @@
     font-family: 'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
   }
 }
+
+/* Tab animations */
+@keyframes tab-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes tab-exit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+}
+
+.animate-tab-enter {
+  animation: tab-enter 0.2s ease-out forwards;
+}
+
+.animate-tab-exit {
+  animation: tab-exit 0.2s ease-in forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-tab-enter,
+  .animate-tab-exit {
+    animation: none;
+  }
+}

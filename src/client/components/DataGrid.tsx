@@ -45,6 +45,9 @@ interface DataGridProps {
   onFiltersChange?: (filters: FilterType[]) => void;
   onOpenRelatedTable?: (schema: string, table: string, filters: FilterType[]) => void;
   onRowSelected?: (row: Record<string, any> | null, primaryKeyColumns: string[]) => void;
+  onForeignKeyCellSelected?: (parent: { schema: string; table: string; filters: FilterType[] } | null) => void;
+  initialSelection?: CellSelection | null;
+  onSelectionChange?: (selection: CellSelection | null) => void;
 }
 
 const TABLE_CONFIG_STORAGE_KEY = 'datapeek_table_config';
@@ -212,7 +215,7 @@ function saveColumnVisibility(schema: string, table: string, visibility: Visibil
   saveTableConfig(schema, table, config, connectionId);
 }
 
-interface CellSelection {
+export interface CellSelection {
   startRow: number;
   startCol: string;
   endRow: number;
@@ -276,6 +279,9 @@ export function DataGrid({
   onFiltersChange,
   onOpenRelatedTable,
   onRowSelected,
+  onForeignKeyCellSelected,
+  initialSelection,
+  onSelectionChange,
 }: DataGridProps) {
   const connectionId = connectionInfo?.connectionId || null;
   const dbType = connectionInfo?.dbType || 'mssql';
@@ -340,19 +346,19 @@ export function DataGrid({
     }
   }, [schema, table, connectionId]);
 
-  // Reset page and clear selection when table changes
+  // Reset page and restore selection when table changes (preserve selection per-tab)
   useEffect(() => {
     setPage(1);
     // Don't reset columnOrder here - it will be loaded by the load effect below
     // Don't reset columnVisibility here - it will be loaded by the load effect below
-    setSelection(null);
+    setSelection(initialSelection ?? null);
     setShowColumnOptions(null);
     setColumnOptionsPosition(null);
     setColumnFilters([]);
     setStructuredFilters([]);
     setShowColumnOptions(null);
     setColumnOptionsPosition(null);
-  }, [schema, table]);
+  }, [schema, table]); // eslint-disable-line react-hooks/exhaustive-deps -- initialSelection intentionally not in deps to avoid overwriting on parent sync
 
   // Sync structuredFilters with columnFilters (for backward compatibility with react-table)
   useEffect(() => {
@@ -506,6 +512,44 @@ export function DataGrid({
       onRowSelected(null, []);
     }
   }, [selection, data?.data, primaryKeyColumns, onRowSelected]);
+
+  // Notify parent when a single FK cell is selected (for parent table link in header)
+  useEffect(() => {
+    if (!onForeignKeyCellSelected) return;
+    if (
+      selection &&
+      selection.startRow === selection.endRow &&
+      selection.startCol === selection.endCol &&
+      selection.selectionType === 'cell' &&
+      data?.data
+    ) {
+      const columnId = selection.startCol;
+      const fkInfo = foreignKeyMap[columnId];
+      if (fkInfo) {
+        const row = data.data[selection.startRow];
+        const value = row?.[columnId];
+        if (value !== null && value !== undefined) {
+          onForeignKeyCellSelected({
+            schema: fkInfo.referencedSchema,
+            table: fkInfo.referencedTable,
+            filters: [{
+              column: fkInfo.referencedColumn,
+              operator: 'eq',
+              value,
+              dataType: typeof value === 'number' ? 'int' : 'varchar',
+            }],
+          });
+          return;
+        }
+      }
+    }
+    onForeignKeyCellSelected(null);
+  }, [selection, data?.data, foreignKeyMap, onForeignKeyCellSelected]);
+
+  // Notify parent of selection changes (for preserving selection when switching tabs)
+  useEffect(() => {
+    onSelectionChange?.(selection);
+  }, [selection, onSelectionChange]);
 
   // Get default column order from data
   const defaultColumnOrder = useMemo(() => {
