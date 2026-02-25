@@ -271,6 +271,9 @@ export async function executeQuery(
     
     return result.rows || [];
   } catch (error: any) {
+    if (messages.length > 0) {
+      error.messages = messages;
+    }
     // Unregister on error
     if (queryId) {
       const { unregisterQuery } = await import('./queryCancellation.js');
@@ -281,6 +284,9 @@ export async function executeQuery(
       const cancelError: any = new Error('Query was cancelled by user');
       cancelError.code = 'ECANCEL';
       cancelError.cancelled = true;
+      if (messages.length > 0) {
+        cancelError.messages = messages;
+      }
       throw cancelError;
     }
     // Enhance timeout error messages
@@ -303,18 +309,34 @@ export async function executeQueryMultiple(
   query: string,
   parameters?: Array<{ name: string; value: any; type?: any }>,
   queryId?: string
-): Promise<{ recordsets: any[][]; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
+): Promise<{
+  recordsets: any[][];
+  columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }>;
+  messages?: Array<{ type: 'info' | 'warning' | 'error'; message: string }>;
+}> {
   if (!pool) {
     throw new Error('Not connected to database');
   }
 
   let client: PoolClient | null = null;
+  let noticeHandler: ((notice: any) => void) | null = null;
+  const messages: Array<{ type: 'info' | 'warning' | 'error'; message: string }> = [];
   
   try {
-    // Get a client for cancellation support
-    if (queryId) {
-      client = await pool.connect();
-    }
+    // Use a client to support cancellation and notice (message) capture
+    client = await pool.connect();
+    noticeHandler = (notice: any) => {
+      const message = typeof notice?.message === 'string' ? notice.message : String(notice ?? '');
+      if (!message.trim()) return;
+      const severity = String(notice?.severity || '').toUpperCase();
+      const type: 'info' | 'warning' | 'error' = severity.includes('ERROR')
+        ? 'error'
+        : severity.includes('WARNING')
+        ? 'warning'
+        : 'info';
+      messages.push({ type, message });
+    };
+    client.on('notice', noticeHandler);
     
     // PostgreSQL doesn't natively support multiple result sets in a single query
     // Split queries by semicolon and execute sequentially
@@ -353,9 +375,7 @@ export async function executeQueryMultiple(
       });
     }
     
-    const result = client 
-      ? await client.query(convertedQuery, values)
-      : await pool.query(convertedQuery, values);
+    const result = await client.query(convertedQuery, values);
     
     // Release cancellation client
     if (cancelClient) {
@@ -382,6 +402,7 @@ export async function executeQueryMultiple(
     return {
       recordsets,
       columnMetadata: columnMetadata.length > 0 ? columnMetadata : undefined,
+      messages: messages.length > 0 ? messages : undefined,
     };
   } catch (error: any) {
     // Unregister on error
@@ -401,12 +422,18 @@ export async function executeQueryMultiple(
       const timeoutError: any = new Error('Query execution timeout. The query took too long to execute. Try simplifying your query or reducing the result set size.');
       timeoutError.code = 'ETIMEOUT';
       timeoutError.originalError = error;
+      if (messages.length > 0) {
+        timeoutError.messages = messages;
+      }
       throw timeoutError;
     }
     throw error;
   } finally {
     // Release client if we acquired one
     if (client) {
+      if (noticeHandler) {
+        client.off('notice', noticeHandler);
+      }
       client.release();
     }
   }

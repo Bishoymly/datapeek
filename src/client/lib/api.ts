@@ -230,7 +230,14 @@ export const api = {
     return res.json();
   },
 
-  async executeQuery(query: string, queryId?: string): Promise<{ data: any[]; resultSets?: any[][]; executionTime?: number; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }>; queryId?: string }> {
+  async executeQuery(query: string, queryId?: string): Promise<{
+    data: any[];
+    resultSets?: any[][];
+    executionTime?: number;
+    columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }>;
+    messages?: Array<{ type: 'info' | 'warning' | 'error'; message: string }>;
+    queryId?: string;
+  }> {
     const res = await fetch(`${API_BASE}/query`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -241,9 +248,16 @@ export const api = {
       if (error.cancelled) {
         const cancelError: any = new Error('Query was cancelled');
         cancelError.cancelled = true;
+        if (Array.isArray(error.messages)) {
+          cancelError.messages = error.messages;
+        }
         throw cancelError;
       }
-      throw new Error(error.error || 'Query failed');
+      const queryError: any = new Error(error.error || 'Query failed');
+      if (Array.isArray(error.messages)) {
+        queryError.messages = error.messages;
+      }
+      throw queryError;
     }
     return res.json();
   },

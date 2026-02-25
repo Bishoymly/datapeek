@@ -26,12 +26,7 @@ interface QueryEditorEnhancedProps {
   onQueryChange?: (query: string) => void;
 }
 
-interface QueryResult {
-  data: any[];
-  error?: string;
-  executionTime?: number;
-  rowsAffected?: number;
-}
+type QueryMessage = { type: 'success' | 'error' | 'info' | 'warning'; message: string; time: number };
 
 interface CellSelection {
   startRow: number;
@@ -40,6 +35,47 @@ interface CellSelection {
   endCol: string;
   selectionType?: 'cell' | 'row' | 'column';
   resultSetIndex?: number; // For multiple result sets
+}
+
+function normalizeDuplicateColumns(resultSet: any[]): any[] {
+  if (!resultSet || resultSet.length === 0) return resultSet;
+
+  const columnOrder: string[] = [];
+  const maxOccurrences = new Map<string, number>();
+
+  for (const row of resultSet) {
+    const entries = Object.entries(row || {});
+    for (const [columnName, value] of entries) {
+      if (!maxOccurrences.has(columnName)) {
+        columnOrder.push(columnName);
+      }
+      const occurrenceCount = Array.isArray(value) ? value.length : 1;
+      const existing = maxOccurrences.get(columnName) || 0;
+      if (occurrenceCount > existing) {
+        maxOccurrences.set(columnName, occurrenceCount);
+      }
+    }
+  }
+
+  const hasDuplicateColumns = Array.from(maxOccurrences.values()).some((count) => count > 1);
+  if (!hasDuplicateColumns) return resultSet;
+
+  return resultSet.map((row) => {
+    const normalizedRow: Record<string, any> = {};
+
+    for (const columnName of columnOrder) {
+      const maxCount = maxOccurrences.get(columnName) || 1;
+      const rawValue = row?.[columnName];
+      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+
+      for (let i = 0; i < maxCount; i++) {
+        const key = i === 0 ? columnName : `${columnName}__dup${i + 1}`;
+        normalizedRow[key] = i < values.length ? values[i] : null;
+      }
+    }
+
+    return normalizedRow;
+  });
 }
 
 function getQueries(connectionId: string | null): SavedQuery[] {
@@ -93,13 +129,11 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
   const [query, setQuery] = useState(savedQuery?.query || 'SELECT TOP 100 * FROM ');
   const [isDark, setIsDark] = useState(false);
   const [executionTime, setExecutionTime] = useState<number | null>(null);
-  const [messages, setMessages] = useState<Array<{ type: 'success' | 'error' | 'info'; message: string; time: number }>>([]);
+  const [messages, setMessages] = useState<QueryMessage[]>([]);
   
   // Resizable panes state
   const [editorHeight, setEditorHeight] = useState(40); // percentage
-  const [resultsHeight, setResultsHeight] = useState(35); // percentage
-  const [messagesHeight, setMessagesHeight] = useState(25); // percentage
-  const [isResizing, setIsResizing] = useState<'editor' | 'results' | null>(null);
+  const [isResizing, setIsResizing] = useState<'editor' | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const lastQueryIdRef = useRef<string | undefined>(queryId);
   const isRestoringRef = useRef(false);
@@ -145,7 +179,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
   }, []);
 
   // Store results per query ID
-  const resultsCacheRef = useRef<Map<string, { resultSets: any[][]; error: Error | null; executionTime: number | null; messages: Array<{ type: 'success' | 'error' | 'info'; message: string; time: number }> }>>(new Map());
+  const resultsCacheRef = useRef<Map<string, { resultSets: any[][]; error: Error | null; executionTime: number | null; messages: QueryMessage[] }>>(new Map());
   
   const [queryResultSets, setQueryResultSets] = useState<any[][]>([]);
   const [queryError, setQueryError] = useState<Error | null>(null);
@@ -175,6 +209,9 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
   const resultsTableRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   // Store column keys from successful queries per result set
   const [lastColumnKeys, setLastColumnKeys] = useState<Map<number, string[]>>(new Map());
+  const getDisplayColumnName = useCallback((columnKey: string): string => {
+    return columnKey.replace(/__dup\d+$/, '');
+  }, []);
 
   // Selection helpers
   const getColumnKeys = useCallback((resultSet: any[]): string[] => {
@@ -368,7 +405,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
     const lines: string[] = [];
     
     if (includeHeaders) {
-      lines.push(selectedColumns.join('\t'));
+      lines.push(selectedColumns.map((col) => getDisplayColumnName(col)).join('\t'));
     }
     
     selectedRows.forEach((row) => {
@@ -404,7 +441,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
         console.error('Fallback copy method error:', fallbackError);
       }
     }
-  }, [selections, queryResultSets, getColumnKeys]);
+  }, [selections, queryResultSets, getColumnKeys, getDisplayColumnName]);
 
   // Handle mouse up
   useEffect(() => {
@@ -422,6 +459,14 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isEditorFocused = !!editorRef.current?.hasTextFocus?.() ||
+        !!activeElement?.closest('.monaco-editor');
+
+      if (isEditorFocused) {
+        return;
+      }
+
       const activeResultSetIndex = Array.from(selections.keys())[0] ?? 0;
       const selection = selections.get(activeResultSetIndex);
       
@@ -450,7 +495,6 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
           }
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selection) {
-        const activeElement = document.activeElement;
         const isInputElement = activeElement && (
           activeElement.tagName === 'INPUT' ||
           activeElement.tagName === 'TEXTAREA' ||
@@ -486,7 +530,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
       
       // Get column headers
       const headers = Object.keys(resultSet[0]);
-      csvContent += headers.join(',') + '\n';
+      csvContent += headers.map((header) => getDisplayColumnName(header)).join(',') + '\n';
       
       // Add rows
       resultSet.forEach((row) => {
@@ -522,7 +566,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-  }, [queryResultSets, savedQuery]);
+  }, [queryResultSets, savedQuery, getDisplayColumnName]);
 
   const exportToExcel = useCallback(() => {
     if (queryResultSets.length === 0) return;
@@ -540,8 +584,13 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
         return;
       }
       
-      // Convert result set to worksheet
-      const worksheet = XLSX.utils.json_to_sheet(resultSet);
+      // Convert result set to worksheet, preserving duplicate column display names
+      const headers = Object.keys(resultSet[0]);
+      const worksheetData = [
+        headers.map((header) => getDisplayColumnName(header)),
+        ...resultSet.map((row) => headers.map((header) => row[header])),
+      ];
+      const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
       
       // Add sheet to workbook
       const sheetName = queryResultSets.length > 1 
@@ -562,7 +611,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-  }, [queryResultSets, savedQuery]);
+  }, [queryResultSets, savedQuery, getDisplayColumnName]);
 
   // Restore results and load query when switching queries
   useEffect(() => {
@@ -664,9 +713,10 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
       setExecutionTime(execTime);
       
       // Handle multiple result sets - use resultSets if available, otherwise wrap data in array
-      const resultSets = result.resultSets && result.resultSets.length > 0 
+      const rawResultSets = result.resultSets && result.resultSets.length > 0 
         ? result.resultSets 
         : (result.data ? [result.data] : []);
+      const resultSets = rawResultSets.map((rs) => normalizeDuplicateColumns(rs));
       setQueryResultSets(resultSets);
       
       // Store column metadata for empty result sets
@@ -678,19 +728,11 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
         setLastColumnKeys(newColumnKeys);
       }
       
-      const totalRows = resultSets.reduce((sum, rs) => sum + rs.length, 0);
-      const resultSetCount = resultSets.length;
-      const messageText = resultSetCount > 1
-        ? `Query executed successfully. ${resultSetCount} result set(s) returned with ${totalRows} total row(s).`
-        : `Query executed successfully. ${totalRows} row(s) returned.`;
-      
-      const newMessages = [
-        {
-          type: 'success' as const,
-          message: messageText,
-          time: execTime,
-        },
-      ];
+      const newMessages: QueryMessage[] = (result.messages || []).map((msg) => ({
+        type: msg.type === 'error' ? 'error' : msg.type === 'warning' ? 'warning' : 'info',
+        message: msg.message,
+        time: execTime,
+      }));
       setMessages(newMessages);
       
       // Update cache with new results
@@ -741,13 +783,26 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
       const execTime = 0;
       setExecutionTime(null);
       setQueryError(err);
-      const newMessages = [
-        {
-          type: 'error' as const,
-          message: err.message || 'Query execution failed',
-          time: execTime,
-        },
-      ];
+      const serverMessages: QueryMessage[] = Array.isArray(err?.messages)
+        ? err.messages
+            .map((msg: any) => {
+              const text = typeof msg?.message === 'string' ? msg.message : String(msg ?? '');
+              if (!text.trim()) return null;
+              const type: 'error' | 'warning' | 'info' =
+                msg?.type === 'warning' ? 'warning' : msg?.type === 'error' ? 'error' : 'info';
+              return { type, message: text, time: execTime } as QueryMessage;
+            })
+            .filter((msg: QueryMessage | null): msg is QueryMessage => msg !== null)
+        : [];
+      const newMessages: QueryMessage[] = serverMessages.length > 0
+        ? serverMessages
+        : [
+            {
+              type: 'error',
+              message: err.message || 'Query execution failed',
+              time: execTime,
+            },
+          ];
       setMessages(newMessages);
       
       // Update cache with error
@@ -784,8 +839,8 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
   };
 
   // Resize handlers
-  const handleMouseDown = useCallback((pane: 'editor' | 'results') => {
-    setIsResizing(pane);
+  const handleMouseDown = useCallback(() => {
+    setIsResizing('editor');
   }, []);
 
   const handleMouseMove = useCallback(
@@ -798,20 +853,11 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
       const percentage = (y / rect.height) * 100;
 
       if (isResizing === 'editor') {
-        const newEditorHeight = Math.max(20, Math.min(70, percentage));
-        const remaining = 100 - newEditorHeight;
+        const newEditorHeight = Math.max(20, Math.min(80, percentage));
         setEditorHeight(newEditorHeight);
-        setResultsHeight(remaining * 0.6);
-        setMessagesHeight(remaining * 0.4);
-      } else if (isResizing === 'results') {
-        const remaining = 100 - editorHeight;
-        const newResultsHeight = Math.max(15, Math.min(remaining - 15, percentage - editorHeight));
-        const newMessagesHeight = remaining - newResultsHeight;
-        setResultsHeight(newResultsHeight);
-        setMessagesHeight(newMessagesHeight);
       }
     },
-    [isResizing, editorHeight]
+    [isResizing]
   );
 
   const handleMouseUp = useCallback(() => {
@@ -885,12 +931,6 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
               <X className="mr-2 h-3 w-3" />
               Cancel
             </Button>
-          )}
-          {executionTime !== null && (
-            <div className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Clock className="h-3 w-3" />
-              {executionTime}ms
-            </div>
           )}
         </div>
         <div className="text-xs text-muted-foreground font-mono">
@@ -1025,20 +1065,31 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
           onMouseDown={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            handleMouseDown('editor');
+            handleMouseDown();
           }}
           style={{ pointerEvents: 'auto' }}
         />
       </div>
 
       {/* Results Pane */}
-      <div style={{ height: `${resultsHeight}%` }} className="relative border-b flex flex-col">
+      <div style={{ height: `${100 - editorHeight}%` }} className="border-b flex flex-col">
         <div className="border-b p-2 bg-muted/30 text-xs text-muted-foreground flex items-center justify-between">
           <span>Results</span>
           <div className="flex items-center gap-2">
             {queryResultSets.length > 1 && (
               <span>
                 {queryResultSets.length} result sets
+              </span>
+            )}
+            {queryResultSets.length === 1 && (
+              <span>
+                {queryResultSets[0].length} {queryResultSets[0].length === 1 ? 'row' : 'rows'}
+              </span>
+            )}
+            {executionTime !== null && (
+              <span className="flex items-center gap-1">
+                <Clock className="h-3 w-3" />
+                {executionTime}ms
               </span>
             )}
             {queryResultSets.length > 0 && (
@@ -1081,7 +1132,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto pb-4">
           {isExecuting ? (
             <div className="p-4 text-sm text-muted-foreground flex items-center justify-center gap-2 h-full">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -1110,7 +1161,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                         ref={(el) => {
                           if (el) resultsTableRefs.current.set(resultSetIndex, el);
                         }}
-                        className="overflow-auto h-full"
+                        className="overflow-x-auto"
                         tabIndex={0}
                       >
                         <table className="w-full text-xs border-collapse" style={{ tableLayout: 'auto', minWidth: '100%' }}>
@@ -1122,7 +1173,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                                   key={key} 
                                   className="border-b p-2 text-left font-medium text-muted-foreground"
                                 >
-                                  {key}
+                                  {getDisplayColumnName(key)}
                                 </th>
                               ))}
                             </tr>
@@ -1151,7 +1202,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                     ref={(el) => {
                       if (el) resultsTableRefs.current.set(resultSetIndex, el);
                     }}
-                    className="overflow-auto h-full"
+                    className="overflow-x-auto"
                     tabIndex={0}
                     onMouseLeave={() => setIsSelecting(prev => {
                       const newMap = new Map(prev);
@@ -1191,7 +1242,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                               className="border-b p-2 text-left font-medium text-muted-foreground cursor-pointer"
                               onMouseDown={(e) => handleColumnHeaderClick(e, key, resultSetIndex)}
                             >
-                              {key}
+                              {getDisplayColumnName(key)}
                             </th>
                           ))}
                         </tr>
@@ -1316,7 +1367,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                                     className="border-b p-2 text-left font-medium text-muted-foreground cursor-pointer"
                                     onMouseDown={(e) => handleColumnHeaderClick(e, key, resultSetIndex)}
                                   >
-                                    {key}
+                                    {getDisplayColumnName(key)}
                                   </th>
                                 ))}
                               </tr>
@@ -1383,7 +1434,7 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                                     key={key} 
                                     className="border-b p-2 text-left font-medium text-muted-foreground"
                                   >
-                                    {key}
+                                    {getDisplayColumnName(key)}
                                   </th>
                                 ))}
                               </tr>
@@ -1415,25 +1466,10 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
               No results yet. Execute a query to see results.
             </div>
           )}
-        </div>
-        {/* Resize handle */}
-        <div
-          className="absolute bottom-0 left-0 right-0 h-1 bg-border cursor-row-resize hover:bg-primary/50 transition-colors z-10"
-          onMouseDown={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            handleMouseDown('results');
-          }}
-          style={{ pointerEvents: 'auto' }}
-        />
-      </div>
-
-      {/* Messages Pane */}
-      <div style={{ height: `${messagesHeight}%` }} className="flex flex-col">
-        <div className="border-b p-2 bg-muted/30 text-xs text-muted-foreground">
-          Messages ({messages.length})
-        </div>
-        <div className="flex-1 overflow-auto p-2 space-y-1">
+          <div className="border-t p-2 bg-muted/20 text-xs text-muted-foreground">
+            Messages ({messages.length})
+          </div>
+          <div className="p-2 pb-4 space-y-1">
           {messages.length === 0 ? (
             <div className="text-xs text-muted-foreground text-center py-4">
               No messages yet
@@ -1445,25 +1481,23 @@ export function QueryEditorEnhanced({ queryId, connectionInfo, onQueryUpdate, on
                 className={`text-xs p-2 rounded flex items-start gap-2 ${
                   msg.type === 'error'
                     ? 'bg-destructive/10 text-destructive'
-                    : msg.type === 'success'
-                    ? 'bg-green-500/10 text-green-600 dark:text-green-400'
+                    : msg.type === 'warning'
+                    ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400'
                     : 'bg-muted'
                 }`}
               >
-                {msg.type === 'error' ? (
+                {msg.type === 'error' || msg.type === 'warning' ? (
                   <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />
                 ) : (
                   <CheckCircle2 className="h-3 w-3 mt-0.5 flex-shrink-0" />
                 )}
                 <div className="flex-1">
                   <div>{msg.message}</div>
-                  <div className="text-muted-foreground mt-0.5">
-                    {msg.time}ms
-                  </div>
                 </div>
               </div>
             ))
           )}
+          </div>
         </div>
       </div>
     </div>

@@ -216,14 +216,24 @@ export async function executeQueryMultiple(
   query: string, 
   parameters?: Array<{ name: string; value: any; type?: any }>,
   queryId?: string
-): Promise<{ recordsets: any[][]; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
+): Promise<{
+  recordsets: any[][];
+  columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }>;
+  messages?: Array<{ type: 'info' | 'warning' | 'error'; message: string }>;
+}> {
   if (!pool || !pool.connected) {
     throw new Error('Not connected to database');
   }
   
   const request = pool.request();
+  const messages: Array<{ type: 'info' | 'warning' | 'error'; message: string }> = [];
   // Set request timeout (overrides pool default if needed)
   request.timeout = 1800000; // 30 minutes
+  request.on('info', (info: any) => {
+    const message = typeof info?.message === 'string' ? info.message : String(info ?? '');
+    if (!message.trim()) return;
+    messages.push({ type: 'info', message });
+  });
   
   // Register for cancellation if queryId provided
   if (queryId) {
@@ -250,6 +260,7 @@ export async function executeQueryMultiple(
   try {
     const result = await request.query(query);
     const recordsets = result.recordsets || [];
+    const rowsAffected: number[] = Array.isArray((result as any).rowsAffected) ? (result as any).rowsAffected : [];
     
     // Extract column metadata for empty result sets
     // SQL Server provides column metadata even when result sets are empty
@@ -343,8 +354,21 @@ export async function executeQueryMultiple(
       unregisterQuery(queryId);
     }
     
-    return { recordsets, columnMetadata: columnMetadata.length > 0 ? columnMetadata : undefined };
+    const rowCountMessages = rowsAffected.map((count) => ({
+      type: 'info' as const,
+      message: `(${count} ${count === 1 ? 'row' : 'rows'} affected)`,
+    }));
+
+    const combinedMessages = [...messages, ...rowCountMessages];
+    return {
+      recordsets,
+      columnMetadata: columnMetadata.length > 0 ? columnMetadata : undefined,
+      messages: combinedMessages.length > 0 ? combinedMessages : undefined,
+    };
   } catch (error: any) {
+    if (messages.length > 0) {
+      error.messages = messages;
+    }
     // Unregister on error
     if (queryId) {
       const { unregisterQuery } = await import('./queryCancellation.js');
@@ -355,6 +379,9 @@ export async function executeQueryMultiple(
       const cancelError: any = new Error('Query was cancelled by user');
       cancelError.code = 'ECANCEL';
       cancelError.cancelled = true;
+      if (messages.length > 0) {
+        cancelError.messages = messages;
+      }
       throw cancelError;
     }
     // Enhance timeout error messages
@@ -362,6 +389,9 @@ export async function executeQueryMultiple(
       const timeoutError: any = new Error('Query execution timeout. The query took too long to execute. Try simplifying your query or reducing the result set size.');
       timeoutError.code = 'ETIMEOUT';
       timeoutError.originalError = error;
+      if (messages.length > 0) {
+        timeoutError.messages = messages;
+      }
       throw timeoutError;
     }
     throw error;

@@ -8,7 +8,7 @@ import { QueryEditorEnhanced } from './components/QueryEditorEnhanced';
 import { api, type ConnectionConfig, type Filter } from './lib/api';
 import { getNameDisplayMode, saveNameDisplayMode, formatName } from './lib/nameFormatter';
 import { getConnectionId, getConnectionKey, type ConnectionInfo } from './lib/connectionState';
-import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag, Link2 } from 'lucide-react';
+import { Database, X, Loader2, ChevronDown, Pencil, Check, Trash2, Star, ChevronUp, ChevronDown as ChevronDownIcon, Tag, Link2, WifiOff } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { useRelatedTables } from './hooks/useRelatedTables';
 import { Button } from './components/ui/button';
@@ -488,6 +488,29 @@ function AppContent() {
     enabled: connected,
   });
 
+  const restoreConnectionInfoFromRecent = (expectedDatabase?: string | null) => {
+    try {
+      const recentConnections = localStorage.getItem('datapeek_recent_connections');
+      if (!recentConnections) return;
+      const recent = JSON.parse(recentConnections);
+      if (!Array.isArray(recent) || recent.length === 0) return;
+      const matching = expectedDatabase
+        ? recent.find((conn: any) => conn?.database === expectedDatabase)
+        : recent[0];
+      if (!matching) return;
+      const connectionId = getConnectionId(matching);
+      if (!connectionId) return;
+      setConnectionInfo((prev) => prev ?? {
+        server: matching.server,
+        database: matching.database,
+        dbType: matching.dbType || 'mssql',
+        connectionId,
+      });
+    } catch {
+      // Ignore parse errors
+    }
+  };
+
   useEffect(() => {
     if (connectionStatus) {
       if (connectionStatus.connected) {
@@ -517,9 +540,8 @@ function AppContent() {
           }
         }
       } else {
-        // Connection lost - clear connection info
-        setConnectionInfo(null);
-        // Keep current UI (including sidebar errors) and prompt reconnect.
+        // Connection lost - keep loaded state available and prompt reconnect.
+        setConnected(false);
         setShowConnectionDialog(true);
       }
     }
@@ -583,6 +605,8 @@ function AppContent() {
           }
         }
       } else {
+        setConnected(false);
+        restoreConnectionInfoFromRecent(status.databaseName);
         // Check for provided connection string
         console.log('Not connected, checking for provided connection string...');
         const { connectionString } = await api.getProvidedConnectionString();
@@ -600,7 +624,7 @@ function AppContent() {
           console.log('No connection string provided, showing dialog');
           setIsAutoConnecting(false);
           setShowConnectionDialog(true);
-        }
+      }
       }
     } catch (error) {
       console.error('Error in checkConnection:', error);
@@ -773,16 +797,13 @@ function AppContent() {
     try {
       await api.disconnect();
       setConnected(false);
-      setConnectionInfo(null);
-      setTableTabs([]);
-      setActiveTabId(undefined);
-      setSelectedQuery(undefined);
-      setTableQueries({});
       setShowConnectionDialog(true);
     } catch (error) {
       console.error('Disconnect error:', error);
     }
   }
+
+  const hasRetainedWorkspace = !!connectionInfo || tableTabs.length > 0 || !!selectedQuery;
 
   return (
     <div className="flex h-screen flex-col bg-content-bg dark:bg-content-bg">
@@ -902,6 +923,22 @@ function AppContent() {
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
+            {!connected && hasRetainedWorkspace && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="flex items-center gap-2 px-2 py-1 rounded bg-destructive/10 text-destructive text-xs hover:bg-destructive/20 transition-colors cursor-pointer">
+                    <WifiOff className="h-3.5 w-3.5" />
+                    Disconnected
+                    <ChevronDown className="h-3 w-3 opacity-70" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onClick={() => setShowConnectionDialog(true)}>
+                    Reconnect
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
       </header>
@@ -921,7 +958,7 @@ function AppContent() {
             </div>
           </div>
         </div>
-      ) : connected ? (
+      ) : connected || hasRetainedWorkspace ? (
         <div className="flex flex-1 overflow-hidden">
           {/* Sidebar */}
           <div className="w-72 flex-shrink-0">
@@ -952,6 +989,7 @@ function AppContent() {
               connected={connected}
               connectionInfo={connectionInfo}
               onConnectionLost={() => {
+                setConnected(false);
                 setShowConnectionDialog(true);
               }}
             />
@@ -992,7 +1030,11 @@ function AppContent() {
                 ) : (
                   <>
                     <div className="flex items-center gap-2 px-4 py-2 border-b-2 border-primary">
-                      <span className="text-sm font-medium">
+                      <span
+                        className="text-sm font-medium cursor-text"
+                        onDoubleClick={handleStartRenameQuery}
+                        title="Double-click to rename"
+                      >
                         {selectedQueryName}
                       </span>
                       <button
@@ -1212,6 +1254,7 @@ function AppContent() {
       {/* Connection Dialog */}
       <ConnectionDialog
         open={showConnectionDialog && !isAutoConnecting}
+        onOpenChange={setShowConnectionDialog}
         onConnect={(config) => {
           handleConnect(config);
         }}

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
   useReactTable,
   getCoreRowModel,
@@ -425,12 +425,21 @@ export function DataGrid({
   }, [schema, table, connectionId, tableStructure]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch table data first (needed for foreign key values extraction)
-  const { data, isLoading, error, isFetching, refetch } = useQuery<TableData>({
+  const { data: queryData, isLoading, error, isFetching, refetch } = useQuery<TableData>({
     queryKey: ['table-data', schema, table, page, pageSize, sortColumn, sortDirection, structuredFilters, fkDisplayMode],
     queryFn: () => api.getTableData(schema, table, page, pageSize, sortColumn, sortDirection, structuredFilters.length > 0 ? structuredFilters : undefined, fkDisplayMode),
     enabled: !!schema && !!table,
-    keepPreviousData: true, // Keep previous data while fetching new data
+    // v5: keep previous rows visible while query key changes (filters/sort/paging).
+    placeholderData: keepPreviousData,
   });
+  const [lastSuccessfulData, setLastSuccessfulData] = useState<TableData | null>(null);
+  const data = queryData ?? lastSuccessfulData;
+
+  useEffect(() => {
+    if (queryData) {
+      setLastSuccessfulData(queryData);
+    }
+  }, [queryData]);
 
   // Build foreign key map
   const foreignKeyMap = useMemo(() => {
@@ -486,11 +495,11 @@ export function DataGrid({
 
   // Update query in parent when data changes
   useEffect(() => {
-    if (data?.query && onQueryChange) {
-      onQueryChange(data.query);
+    if (queryData?.query && onQueryChange) {
+      onQueryChange(queryData.query);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.query]);
+  }, [queryData?.query]);
 
   // Notify parent when a single row is selected (for related tables tabs)
   useEffect(() => {
@@ -1354,6 +1363,12 @@ export function DataGrid({
   // Handle Ctrl+A to select all and Ctrl+C to copy
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isEditorFocused = !!activeElement?.closest('.monaco-editor');
+      if (isEditorFocused) {
+        return;
+      }
+
       // For Ctrl+A, only handle if the table container or its children have focus
       const isTableFocused = tableRef.current?.contains(document.activeElement) || 
                              document.activeElement === tableRef.current;
@@ -1374,7 +1389,6 @@ export function DataGrid({
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selection) {
         // For Ctrl+C, allow copying if there's a selection, even if table doesn't have focus
         // But only if we're not in an input/textarea (to avoid interfering with normal text selection)
-        const activeElement = document.activeElement;
         const isInputElement = activeElement && (
           activeElement.tagName === 'INPUT' ||
           activeElement.tagName === 'TEXTAREA' ||
@@ -1403,7 +1417,7 @@ export function DataGrid({
     );
   }
 
-  if (error) {
+  if (error && !data) {
     // Check if it's a timeout error
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     const isTimeout = errorMessage.toLowerCase().includes('timeout') || 
@@ -1669,6 +1683,11 @@ export function DataGrid({
             </select>
           </div>
         </div>
+        {error && data && (
+          <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1 text-xs text-destructive">
+            {error instanceof Error ? error.message : 'Failed to refresh data. Showing last successful results.'}
+          </div>
+        )}
         {structuredFilters.length > 0 && (
           <div className="mt-2 pt-2 border-t border-border/40 flex flex-wrap items-center gap-1.5">
             <div className="text-xs text-muted-foreground inline-flex items-center gap-1 mr-1">

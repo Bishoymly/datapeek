@@ -24,6 +24,47 @@ interface CellSelection {
   selectionType?: 'cell' | 'row' | 'column';
 }
 
+function normalizeDuplicateColumns(resultSet: any[]): any[] {
+  if (!resultSet || resultSet.length === 0) return resultSet;
+
+  const columnOrder: string[] = [];
+  const maxOccurrences = new Map<string, number>();
+
+  for (const row of resultSet) {
+    const entries = Object.entries(row || {});
+    for (const [columnName, value] of entries) {
+      if (!maxOccurrences.has(columnName)) {
+        columnOrder.push(columnName);
+      }
+      const occurrenceCount = Array.isArray(value) ? value.length : 1;
+      const existing = maxOccurrences.get(columnName) || 0;
+      if (occurrenceCount > existing) {
+        maxOccurrences.set(columnName, occurrenceCount);
+      }
+    }
+  }
+
+  const hasDuplicateColumns = Array.from(maxOccurrences.values()).some((count) => count > 1);
+  if (!hasDuplicateColumns) return resultSet;
+
+  return resultSet.map((row) => {
+    const normalizedRow: Record<string, any> = {};
+
+    for (const columnName of columnOrder) {
+      const maxCount = maxOccurrences.get(columnName) || 1;
+      const rawValue = row?.[columnName];
+      const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+
+      for (let i = 0; i < maxCount; i++) {
+        const key = i === 0 ? columnName : `${columnName}__dup${i + 1}`;
+        normalizedRow[key] = i < values.length ? values[i] : null;
+      }
+    }
+
+    return normalizedRow;
+  });
+}
+
 export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) {
   const connectionId = connectionInfo?.connectionId || null;
   const [query, setQuery] = useState(initialQuery || 'SELECT TOP 100 * FROM ');
@@ -73,6 +114,9 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
   const resultsTableRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<any>(null);
   const [lastColumnKeys, setLastColumnKeys] = useState<string[]>([]);
+  const getDisplayColumnName = useCallback((columnKey: string): string => {
+    return columnKey.replace(/__dup\d+$/, '');
+  }, []);
 
   // Detect dark mode
   useEffect(() => {
@@ -108,7 +152,10 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
       try {
         const result = await api.executeQuery(executionQuery, queryId);
         setActiveQueryId(null);
-        return result;
+        return {
+          ...result,
+          data: normalizeDuplicateColumns(result.data || []),
+        };
       } catch (err: any) {
         setActiveQueryId(null);
         throw err;
@@ -348,7 +395,7 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
     const lines: string[] = [];
     
     if (includeHeaders) {
-      lines.push(selectedColumns.join('\t'));
+      lines.push(selectedColumns.map((col) => getDisplayColumnName(col)).join('\t'));
     }
     
     selectedRows.forEach((row) => {
@@ -384,7 +431,7 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
         console.error('Fallback copy method error:', fallbackError);
       }
     }
-  }, [selection, data?.data, getColumnKeys]);
+  }, [selection, data?.data, getColumnKeys, getDisplayColumnName]);
 
   // Handle mouse up
   useEffect(() => {
@@ -401,6 +448,14 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const activeElement = document.activeElement as HTMLElement | null;
+      const isEditorFocused = !!editorRef.current?.hasTextFocus?.() ||
+        !!activeElement?.closest('.monaco-editor');
+
+      if (isEditorFocused) {
+        return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
         const isTableFocused = resultsTableRef.current?.contains(document.activeElement) || 
                                document.activeElement === resultsTableRef.current;
@@ -419,7 +474,6 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
           }
         }
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selection) {
-        const activeElement = document.activeElement;
         const isInputElement = activeElement && (
           activeElement.tagName === 'INPUT' ||
           activeElement.tagName === 'TEXTAREA' ||
@@ -649,7 +703,7 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
                         className="border-b p-2 text-left font-medium text-muted-foreground cursor-pointer"
                         onMouseDown={(e) => handleColumnHeaderClick(e, key)}
                       >
-                        {key}
+                        {getDisplayColumnName(key)}
                       </th>
                     ))}
                   </tr>
@@ -740,7 +794,7 @@ export function QueryEditor({ initialQuery, connectionInfo }: QueryEditorProps) 
                           key={key} 
                           className="border-b p-2 text-left font-medium text-muted-foreground"
                         >
-                          {key}
+                          {getDisplayColumnName(key)}
                         </th>
                       ))}
                     </tr>

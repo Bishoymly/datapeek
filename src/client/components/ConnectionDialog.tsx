@@ -9,13 +9,14 @@ import { Loader2, Database, Link2, X } from 'lucide-react';
 
 interface ConnectionDialogProps {
   open: boolean;
+  onOpenChange?: (open: boolean) => void;
   onConnect: (config?: ConnectionConfig) => void;
   onError?: () => void;
 }
 
 const STORAGE_KEY = 'datapeek_recent_connections';
 
-export function ConnectionDialog({ open, onConnect, onError }: ConnectionDialogProps) {
+export function ConnectionDialog({ open, onOpenChange, onConnect, onError }: ConnectionDialogProps) {
   const [connectionType, setConnectionType] = useState<'connection-string' | 'mssql' | 'postgres'>('connection-string');
   const [dbType, setDbType] = useState<'mssql' | 'postgres'>('mssql');
   const [config, setConfig] = useState<ConnectionConfig>({
@@ -303,7 +304,7 @@ export function ConnectionDialog({ open, onConnect, onError }: ConnectionDialogP
   }, [dbType]);
 
   return (
-    <Dialog open={open} onOpenChange={() => {}}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[3800px] max-h-[95vh] overflow-y-auto">
         <DialogHeader className="pb-3">
           <div className="flex items-center justify-between">

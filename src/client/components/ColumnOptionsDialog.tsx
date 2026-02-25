@@ -308,6 +308,7 @@ export function ColumnOptionsDialog({
                 fkDisplayColumn={fkDisplayColumn}
                 onApply={(filter) => {
                   onFilterApply(filter);
+                  onClose();
                 }}
                 onClose={() => {}}
                 nameDisplayMode={nameDisplayMode}

@@ -194,7 +194,11 @@ export async function executeQueryMultiple(
   query: string,
   parameters?: Array<{ name: string; value: any; type?: any }>,
   queryId?: string
-): Promise<{ recordsets: any[][]; columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }> }> {
+): Promise<{
+  recordsets: any[][];
+  columnMetadata?: Array<{ resultSetIndex: number; columns: string[] }>;
+  messages?: Array<{ type: 'info' | 'warning' | 'error'; message: string }>;
+}> {
   if (currentDbType === 'postgres') {
     return postgres.executeQueryMultiple(query, parameters, queryId);
   } else {

@@ -3,6 +3,40 @@ import { executeQuery, executeQueryMultiple, cancelQuery, generateQueryId } from
 
 export const queryRoutes = Router();
 
+function extractErrorMessages(error: any): Array<{ type: 'info' | 'warning' | 'error'; message: string }> | undefined {
+  const out: Array<{ type: 'info' | 'warning' | 'error'; message: string }> = [];
+
+  if (Array.isArray(error?.messages)) {
+    for (const msg of error.messages) {
+      const text = typeof msg?.message === 'string' ? msg.message : String(msg ?? '');
+      if (!text.trim()) continue;
+      const type: 'info' | 'warning' | 'error' = msg?.type === 'warning'
+        ? 'warning'
+        : msg?.type === 'error'
+        ? 'error'
+        : 'info';
+      out.push({ type, message: text });
+    }
+  }
+
+  if (Array.isArray(error?.precedingErrors)) {
+    for (const err of error.precedingErrors) {
+      const text = typeof err?.message === 'string' ? err.message : String(err ?? '');
+      if (!text.trim()) continue;
+      out.push({ type: 'error', message: text });
+    }
+  }
+
+  if (error?.message) {
+    const hasPrimary = out.some((msg) => msg.message === error.message);
+    if (!hasPrimary) {
+      out.push({ type: 'error', message: error.message });
+    }
+  }
+
+  return out.length > 0 ? out : undefined;
+}
+
 // Execute SQL query
 queryRoutes.post('/', async (req, res) => {
   try {
@@ -17,7 +51,7 @@ queryRoutes.post('/', async (req, res) => {
     
     const startTime = Date.now();
     // Use executeQueryMultiple to get all result sets
-    const { recordsets: resultSets, columnMetadata } = await executeQueryMultiple(sqlQuery, undefined, activeQueryId);
+    const { recordsets: resultSets, columnMetadata, messages } = await executeQueryMultiple(sqlQuery, undefined, activeQueryId);
     const executionTime = Date.now() - startTime;
     
     // Always return resultSets array (even if single result set for consistency)
@@ -27,6 +61,7 @@ queryRoutes.post('/', async (req, res) => {
       resultSets: resultSets.length > 0 ? resultSets : [],
       executionTime,
       columnMetadata, // Include column metadata for empty result sets
+      messages,
       queryId: activeQueryId // Return queryId so client can track it
     });
   } catch (error: any) {
@@ -34,7 +69,8 @@ queryRoutes.post('/', async (req, res) => {
     if (error.cancelled || error.code === 'ECANCEL') {
       return res.status(499).json({ 
         error: 'Query was cancelled',
-        cancelled: true
+        cancelled: true,
+        messages: extractErrorMessages(error),
       });
     }
     // Check if it's an authentication error
@@ -46,7 +82,8 @@ queryRoutes.post('/', async (req, res) => {
     }
     res.status(500).json({ 
       error: error.message || 'Query execution failed',
-      details: error.originalError?.message 
+      details: error.originalError?.message,
+      messages: extractErrorMessages(error),
     });
   }
 });
